@@ -533,18 +533,18 @@ def run_filters(renqi_data, zt_today, zt_yesterday):
     print(f"[筛选] 连板股: {len(lianban)} 只")
     
     # ===== 条件2：回调股 =====
-    # 今日涨8%以内 + 非ST + 20日内有涨停
+    # 今日上涨（涨幅>0）且涨8%以内 + 非ST + 20日内有涨停
     # 放宽：从人气榜取涨8%以内的，不足20则放宽到涨10%以内
     huiluo = []
     checked_codes = set()
     
-    # 第一轮：涨8%以内
+    # 第一轮：涨幅>0且涨8%以内
     for item in renqi_data:
         code = item["code"]
         name = item["name"]
         change_pct = item.get("change_pct", 0)
         
-        if change_pct > 8.0:
+        if change_pct <= 0 or change_pct > 8.0:
             continue
         if filter_st(name):
             continue
@@ -563,14 +563,14 @@ def run_filters(renqi_data, zt_today, zt_yesterday):
             "rank": item["rank"],
         })
     
-    # 第二轮：如果不足20只，放宽到涨10%以内（即排除涨停股）
+    # 第二轮：如果不足20只，放宽到涨10%以内（排除涨停股）
     if len(huiluo) < 20:
         for item in renqi_data:
             code = item["code"]
             name = item["name"]
             change_pct = item.get("change_pct", 0)
             
-            if change_pct > 10.0 or change_pct <= 8.0:
+            if change_pct <= 8.0 or change_pct > 10.0:
                 continue
             if filter_st(name):
                 continue
@@ -592,14 +592,14 @@ def run_filters(renqi_data, zt_today, zt_yesterday):
             if len(huiluo) >= 20:
                 break
     
-    # 第三轮：如果还不足20只，去掉"20日内有涨停"条件，只取涨8%以内的热门股
+    # 第三轮：如果还不足20只，去掉"20日内有涨停"条件，只取涨8%以内且上涨的热门股
     if len(huiluo) < 20:
         for item in renqi_data:
             code = item["code"]
             name = item["name"]
             change_pct = item.get("change_pct", 0)
             
-            if change_pct > 8.0:
+            if change_pct <= 0 or change_pct > 8.0:
                 continue
             if filter_st(name):
                 continue
