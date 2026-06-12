@@ -133,6 +133,102 @@ def get_renqi_data():
     print(f"[人气榜] 获取到 {len(result)} 条数据")
     return result
 
+# ========== 数据获取：同花顺个股热度（兜底方案） ==========
+
+def get_ths_hot_stock():
+    """
+    从同花顺数据中心获取个股热度排名（兜底方案）
+    接口：同花顺数据中心-热门榜单
+    返回: list[dict]，每个dict包含 code, name, rank, change_pct
+    """
+    url = "https://data.10jqka.com.cn/dataapi/limit_up/limit_up_pool"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer": "https://data.10jqka.com.cn/",
+    }
+    
+    # 尝试从同花顺热门个股页面获取
+    hot_url = "https://q.10jqka.com.cn/"
+    params = {
+        "query": "热门个股排名",
+        "type": "query",
+    }
+    
+    try:
+        # 尝试同花顺问财接口获取热门个股
+        wencai_url = "https://www.iwencai.com/unifiedwap/unified-wap/v2/result/get-robot-data"
+        wencai_headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                          "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Referer": "https://www.iwencai.com/",
+        }
+        wencai_params = {
+            "question": "热门个股排名 今日",
+            "perpage": 100,
+            "page": 1,
+            "secondary_intent": "stock",
+            "log_info": '{"input_type":"typewrite"}',
+            "source": "Ths_iwencai_Xuangu",
+            "version": "2.0",
+            "query_area": "block",
+            "block_list": "",
+            "add_info": '{"urp":{"scene":1,"company":1,"business":1},"contentType":"json","searchInfo":true}',
+        }
+        
+        response = requests.post(wencai_url, json=wencai_params, headers=wencai_headers, timeout=15)
+        data = response.json()
+        
+        if data.get("data") and data["data"].get("answer"):
+            answer = data["data"]["answer"]
+            # 解析JSON中的股票数据
+            components = answer.get("components", [])
+            for comp in components:
+                if comp.get("data") and comp["data"].get("datas"):
+                    items = comp["data"]["datas"]
+                    result = []
+                    for item in items:
+                        code = item.get("code", "")
+                        name = item.get("name", "")
+                        # 尝试获取热度相关字段
+                        hot_rank = item.get("rank", 0)
+                        change_pct = 0
+                        try:
+                            change_pct = float(item.get("changepercent", 0))
+                        except (ValueError, TypeError):
+                            pass
+                        
+                        if code and name:
+                            result.append({
+                                "code": code,
+                                "name": name,
+                                "mark": "",
+                                "rank": hot_rank if hot_rank else len(result) + 1,
+                                "change_pct": change_pct,
+                            })
+                    
+                    if result:
+                        print(f"[同花顺热度] 获取到 {len(result)} 条数据")
+                        return result
+    except Exception as e:
+        print(f"[同花顺热度] 请求失败: {e}")
+    
+    # 如果问财接口也失败，返回空
+    print("[同花顺热度] 兜底方案未获取到数据")
+    return []
+
+def get_renqi_data_with_fallback():
+    """
+    获取人气排行榜数据，优先复盘网，失败时用同花顺热度兜底
+    """
+    data = get_renqi_data()
+    if data:
+        return data
+    
+    print("[人气榜] 复盘网数据为空，启用同花顺热度兜底方案...")
+    time.sleep(2)
+    return get_ths_hot_stock()
+
 # ========== 数据获取：东方财富涨停板 ==========
 
 def get_zt_pool(date_str):
@@ -690,7 +786,6 @@ def main():
     # 检查是否为交易日
     if not is_trading_day():
         print("今日为非交易日，跳过执行")
-        send_text_message(f"【A股筛选】{beijing_now.strftime('%Y-%m-%d')} 为非交易日，跳过执行")
         return
     
     date_str = beijing_now.strftime("%Y%m%d")
@@ -700,10 +795,9 @@ def main():
     
     # ===== Step 1: 获取数据 =====
     print("\n[Step 1] 获取人气榜数据...")
-    renqi_data = get_renqi_data()
+    renqi_data = get_renqi_data_with_fallback()
     if not renqi_data:
         print("人气榜数据为空，任务终止")
-        send_text_message(f"【A股筛选】{date_display} 人气榜数据获取失败，任务终止")
         return
     
     time.sleep(1)
@@ -728,39 +822,15 @@ def main():
     huiluo_img = create_stock_image("回调股", data["huiluo"], f"{output_dir}/回调_{date_str}.png", date_display)
     duanban_img = create_stock_image("断板股", data["duanban"], f"{output_dir}/断板_{date_str}.png", date_display)
     
-    # ===== Step 4: 推送文字消息 =====
-    print("\n[Step 6] 推送文字消息...")
-    
-    # 连板股消息
-    lianban_text = f"【连板股 TOP{len(data['lianban'])} - {date_display}】\n条件：今日涨停 + 非ST\n按人气热度排名\n\n"
-    for i, s in enumerate(data["lianban"][:20], 1):
-        mark = f" {s.get('mark', '')}" if s.get('mark', '') else ""
-        lianban_text += f"{i}. {s['name']}({s['code']}) {s.get('change_pct', 0):+.2f}%{mark}\n"
-    send_text_message(lianban_text)
-    
-    # 回调股消息
-    huiluo_text = f"【回调股 TOP{len(data['huiluo'])} - {date_display}】\n条件：今日涨8%以内 + 非ST + 20日内有涨停\n按人气热度排名\n\n"
-    for i, s in enumerate(data["huiluo"][:20], 1):
-        mark = f" {s.get('mark', '')}" if s.get('mark', '') else ""
-        huiluo_text += f"{i}. {s['name']}({s['code']}) {s.get('change_pct', 0):+.2f}%{mark}\n"
-    send_text_message(huiluo_text)
-    
-    # 断板股消息
-    duanban_text = f"【断板股 TOP{len(data['duanban'])} - {date_display}】\n条件：昨日涨停 + 今日未涨停 + 非ST\n按人气热度排名\n\n"
-    for i, s in enumerate(data["duanban"][:20], 1):
-        ylbc = s.get('yesterday_lbc', 0)
-        duanban_text += f"{i}. {s['name']}({s['code']}) {s.get('change_pct', 0):+.2f}% 昨日{ylbc}连板\n"
-    send_text_message(duanban_text)
-    
-    # ===== Step 5: 推送图片 =====
-    print("\n[Step 7] 推送图片...")
+    # ===== Step 4: 推送图片 =====
+    print("\n[Step 6] 推送图片...")
     send_image(lianban_img)
     send_image(huiluo_img)
     send_image(duanban_img)
-    
+
     print("\n=== 任务完成 ===")
     finish_time = get_beijing_now().strftime('%H:%M:%S')
-    send_text_message(f"【A股筛选】{date_display} {finish_time} 任务执行完成\n连板{len(data['lianban'])}只 | 回调{len(data['huiluo'])}只 | 断板{len(data['duanban'])}只")
+    print(f"{date_display} {finish_time} 任务执行完成 - 连板{len(data['lianban'])}只 | 回调{len(data['huiluo'])}只 | 断板{len(data['duanban'])}只")
 
 if __name__ == "__main__":
     main()
