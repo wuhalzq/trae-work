@@ -287,7 +287,127 @@ def get_zt_pool(date_str):
     print(f"[涨停板] 获取到 {len(result)} 只非ST涨停股")
     return result
 
-# ========== 数据获取：东方财富昨日涨停板 ==========
+# ========== 数据获取：近N日涨停股候选池 ==========
+
+def get_recent_zt_candidates(date_str, days=20):
+    """
+    获取近N个交易日内有过涨停的股票代码集合（用于回调股候选池）
+    通过逐日查询涨停板API获取，跳过无数据的非交易日
+    返回: dict {code: name}
+    """
+    today = datetime.strptime(date_str, "%Y%m%d")
+    all_codes = {}
+    
+    for offset in range(1, days + 10):  # 多回退一些以跳过周末和节假日
+        prev = today - timedelta(days=offset)
+        prev_str = prev.strftime("%Y%m%d")
+        
+        url = "https://push2ex.eastmoney.com/getTopicZTPool"
+        params = {
+            "ut": "7eea3edcaed734bea9cbfc24409ed989",
+            "dpt": "wz.ztzt",
+            "Pageindex": "0",
+            "Pagesize": "500",
+            "sort": "fbt:asc",
+            "date": prev_str,
+            "_": str(int(time.time() * 1000)),
+        }
+        
+        try:
+            response = requests.get(url, params=params, headers=HEADERS, timeout=10)
+            data = response.json()
+            if data.get("data") and data["data"].get("pool"):
+                for item in data["data"]["pool"]:
+                    code = item.get("c", "")
+                    name = item.get("n", "")
+                    if "ST" not in name and code:
+                        all_codes[code] = name
+                # 已经获取了足够的天数（按交易日计）
+                if len(all_codes) >= 50:  # 至少累积50只不同的股票
+                    # 检查是否已覆盖足够交易日
+                    pass
+        except Exception:
+            continue
+        
+        # 一旦覆盖了足够天数就停止
+        if offset >= days + 5:
+            break
+    
+    print(f"[近{days}日涨停候选] 共 {len(all_codes)} 只股票")
+    return all_codes
+
+
+# ========== 数据获取：批量实时行情（腾讯API） ==========
+
+def get_batch_realtime(codes):
+    """
+    批量获取股票实时行情（腾讯API）
+    参数: codes - 股票代码列表
+    返回: dict {code: {name, price, change_pct, volume, amount}}
+    """
+    if not codes:
+        return {}
+    
+    tc_list = [_get_tencent_code(c) for c in codes]
+    result = {}
+    
+    # 腾讯API每次最多约50只，分批查询
+    batch_size = 50
+    for i in range(0, len(tc_list), batch_size):
+        batch = tc_list[i:i + batch_size]
+        url = "https://qt.gtimg.cn/q=" + ",".join(batch)
+        
+        try:
+            response = requests.get(url, headers=HEADERS, timeout=10)
+            text = response.text
+            
+            # 解析每行数据
+            for line in text.strip().split("\n"):
+                if not line.strip() or "=" not in line:
+                    continue
+                # 格式: v_sz000536="51~华映科技~000536~..."
+                var_name = line.split("=")[0].strip()
+                value = line.split("=", 1)[1].strip().strip('"').strip(";")
+                parts = value.split("~")
+                if len(parts) >= 32:
+                    code = parts[2]
+                    name = parts[1]
+                    try:
+                        price = float(parts[3])
+                    except ValueError:
+                        price = 0
+                    try:
+                        change_pct = float(parts[32])
+                    except (ValueError, IndexError):
+                        change_pct = 0
+                    try:
+                        volume = float(parts[6])
+                    except (ValueError, IndexError):
+                        volume = 0
+                    try:
+                        amount = float(parts[37]) if len(parts) > 37 else 0
+                    except (ValueError, IndexError):
+                        amount = 0
+                    try:
+                        turnover_rate = float(parts[38]) if len(parts) > 38 else 0  # 换手率
+                    except (ValueError, IndexError):
+                        turnover_rate = 0
+                    
+                    result[code] = {
+                        "name": name,
+                        "price": price,
+                        "change_pct": change_pct,
+                        "volume": volume,
+                        "amount": amount,
+                        "turnover_rate": turnover_rate,
+                    }
+        except Exception as e:
+            print(f"[批量行情] 批次查询失败: {e}")
+            continue
+        
+        time.sleep(0.3)  # 批次间间隔
+    
+    return result
 
 def get_yesterday_zt_pool(date_str):
     """获取昨日涨停板数据（用于断板筛选）"""
@@ -353,29 +473,25 @@ def get_yesterday_zt_pool(date_str):
     print(f"[昨日涨停] 获取到 {len(result)} 只非ST涨停股")
     return result
 
-# ========== 数据获取：个股历史K线 ==========
+# ========== 数据获取：个股历史K线（腾讯API） ==========
+
+def _get_tencent_code(stock_code):
+    """将纯数字代码转为腾讯代码格式：sh600xxx / sz000xxx"""
+    if stock_code.startswith("6"):
+        return f"sh{stock_code}"
+    else:
+        return f"sz{stock_code}"
 
 def get_stock_kline(stock_code, days=20):
     """
-    获取个股近N日日K线数据
-    返回: list[dict]，每条包含 date, close, high, low, change_pct, volume, amount
+    获取个股近N日日K线数据（腾讯前复权）
+    返回: list[dict]，每条包含 date, open, close, high, low, volume, change_pct
     """
-    market = "1" if stock_code.startswith("6") else "0"
-    secid = f"{market}.{stock_code}"
-    
-    url = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
+    tc = _get_tencent_code(stock_code)
+    url = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
     params = {
-        "secid": secid,
-        "klt": "101",  # 日线
-        "fqt": "1",    # 前复权
-        "beg": "0",
-        "end": "20500101",
-        "lmt": str(days),
-        "fields1": "f1,f2,f3,f4,f5,f6",
-        "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
-        "ut": "fa5fd1943c7b386f172d6893dbfba10b",
-        "forcect": "1",
-        "iscca": "1",
+        "param": f"{tc},day,,,{days},qfq",
+        "_": str(int(time.time() * 1000)),
     }
     
     try:
@@ -384,46 +500,62 @@ def get_stock_kline(stock_code, days=20):
     except Exception as e:
         return []
     
-    if not data.get("data") or not data["data"].get("klines"):
+    if data.get("code") != 0 or not data.get("data"):
+        return []
+    
+    stock_data = data["data"].get(tc)
+    if not stock_data or not stock_data.get("qfqday"):
+        # 尝试不带复权的 day
+        stock_data = data["data"].get(tc, {})
+        raw = stock_data.get("day") or stock_data.get("qfqday") or []
+    else:
+        raw = stock_data["qfqday"]
+    
+    if not raw:
         return []
     
     result = []
-    for line in data["data"]["klines"]:
-        parts = line.split(",")
-        if len(parts) >= 9:
-            result.append({
-                "date": parts[0],
-                "open": float(parts[1]),
-                "close": float(parts[2]),
-                "high": float(parts[3]),
-                "low": float(parts[4]),
-                "volume": float(parts[5]),
-                "amount": float(parts[6]),
-                "amplitude": float(parts[7]),
-                "change_pct": float(parts[8]),
-            })
+    for i, line in enumerate(raw):
+        if len(line) < 6:
+            continue
+        close_price = float(line[2])
+        change_pct = 0.0
+        if i > 0:
+            prev_close = float(raw[i - 1][2])
+            if prev_close > 0:
+                change_pct = (close_price - prev_close) / prev_close * 100
+        
+        result.append({
+            "date": line[0],
+            "open": float(line[1]),
+            "close": close_price,
+            "high": float(line[3]),
+            "low": float(line[4]),
+            "volume": float(line[5]),
+            "change_pct": change_pct,
+        })
     
     return result
 
 def check_near_high(stock_code, days=10):
     """
-    检查近N日内是否接近近期高点
-    判断标准：近N日最高价 >= 近20日最高价的90%
+    检查近N日内股价是否接近或突破过近3个月高点
+    判断标准：近N日最高价 >= 近3个月最高价的90%
     """
-    klines = get_stock_kline(stock_code, days=20)
+    klines = get_stock_kline(stock_code, days=60)
     if len(klines) < 2:
         return False
     
-    # 近20日最高价
-    max_high_20 = max(k["high"] for k in klines)
-    if max_high_20 <= 0:
+    # 近3个月（约60个交易日）最高价
+    max_high_3m = max(k["high"] for k in klines)
+    if max_high_3m <= 0:
         return False
     
     # 近N日最高价
     recent_klines = klines[-days:] if len(klines) >= days else klines
     max_high_recent = max(k["high"] for k in recent_klines)
     
-    return max_high_recent >= max_high_20 * 0.9
+    return max_high_recent >= max_high_3m * 0.9
 
 def check_had_zt_in_days(stock_code, days=20):
     """检查近N日内是否有涨停（涨幅>=9.8%）"""
@@ -434,17 +566,17 @@ def check_had_zt_in_days(stock_code, days=20):
     return False
 
 def check_volume_expand(stock_code):
-    """检查今日成交额是否放大（对比前5日均量）"""
+    """检查今日成交量是否放大（对比前5日均量）"""
     klines = get_stock_kline(stock_code, days=10)
     if len(klines) < 6:
         return True  # 数据不足，默认通过
     
-    today_amount = klines[-1]["amount"]
-    avg_amount = sum(k["amount"] for k in klines[-6:-1]) / 5
+    today_volume = klines[-1]["volume"]
+    avg_volume = sum(k["volume"] for k in klines[-6:-1]) / 5
     
-    if avg_amount <= 0:
+    if avg_volume <= 0:
         return True
-    return today_amount >= avg_amount * 1.2  # 放大20%以上
+    return today_volume >= avg_volume * 1.2  # 放大20%以上
 
 # ========== 筛选逻辑 ==========
 
@@ -462,210 +594,160 @@ def filter_st(name):
     """判断是否为ST股"""
     return "ST" in name.upper()
 
-def run_filters(renqi_data, zt_today, zt_yesterday):
+def build_unified_hotness_rank(renqi_data, candidate_codes):
+    """
+    构建统一的人气热度排名
+    - 有复盘网数据的股票：使用复盘网实际人气排名
+    - 无复盘网数据的股票：按换手率排名作为热度代理
+    返回: dict {code: (rank, mark, change_pct)}
+    """
+    # 复盘网人气排名
+    renqi_map = {}
+    for item in renqi_data:
+        renqi_map[item["code"]] = (item["rank"], item.get("mark", ""), item.get("change_pct", 0))
+    
+    # 不在人气榜的股票：获取换手率排名
+    outside_codes = [c for c in candidate_codes if c not in renqi_map]
+    
+    if outside_codes:
+        print(f"[人气排名] 获取 {len(outside_codes)} 只非人气榜股票的实时数据...")
+        realtime = get_batch_realtime(outside_codes)
+        
+        # 按换手率降序排列，给它们分配排名
+        # 复盘网人气榜最大排名大约99，所以从100开始
+        turnover_ranked = []
+        for code, data in realtime.items():
+            turnover = data.get("turnover_rate", 0)
+            change_pct = data.get("change_pct", 0)
+            name = data.get("name", "")
+            if turnover > 0 or change_pct != 0:
+                turnover_ranked.append((code, turnover, change_pct, name))
+        
+        turnover_ranked.sort(key=lambda x: -x[1])  # 换手率降序
+        for rank_offset, (code, turnover, change_pct, name) in enumerate(turnover_ranked):
+            renqi_map[code] = (100 + rank_offset, "", change_pct)
+    
+    return renqi_map
+
+
+def run_filters(renqi_data, zt_today, zt_yesterday, date_str):
     """
     执行三个筛选条件
-    参数:
-      renqi_data: 人气榜数据
-      zt_today: 今日涨停股
-      zt_yesterday: 昨日涨停股
-    返回: dict with lianban, huiluo, duanban
+    条件1（连板）：今日涨停 + 10日内接近3个月高点 + 非ST + 主板，按人气排名前20
+    条件2（回调）：今日涨0-8% + 成交额放大 + 20日内有涨停 + 20日内接近3个月高点 + 非ST + 主板，按人气排名前20
+    条件3（断板）：昨日涨停 + 今日未涨停 + 20日内接近3个月高点 + 非ST + 主板，按人气排名前20
+    
+    策略：先从全量候选池中按条件筛选，再按人气排名排序取前20。
     """
     
-    # 构建涨停股代码集合
     zt_today_codes = set(s["code"] for s in zt_today)
     zt_yesterday_codes = set(s["code"] for s in zt_yesterday)
-    
-    # 构建人气排名映射（代码 -> 排名）
-    renqi_rank = {}
-    for item in renqi_data:
-        renqi_rank[item["code"]] = item["rank"]
-    
-    # 构建涨停股详细信息映射
     zt_today_map = {s["code"]: s for s in zt_today}
     zt_yesterday_map = {s["code"]: s for s in zt_yesterday}
     
+    # ===== 回调股：收集候选池并获取实时数据 =====
+    print("\n[Step 回调] 收集近20日涨停候选...")
+    recent_zt_candidates = get_recent_zt_candidates(date_str, days=20)
+    
+    # 收集所有需要排名的候选股
+    all_candidate_codes = set(c for c in recent_zt_candidates)
+    all_candidate_codes.update(s["code"] for s in zt_today)
+    all_candidate_codes.update(s["code"] for s in zt_yesterday)
+    
+    # 构建统一的人气排名（复盘网数据 + 换手率代理）
+    print("[人气排名] 构建统一热度排名...")
+    hotness_rank = build_unified_hotness_rank(renqi_data, list(all_candidate_codes))
+    
     # ===== 条件1：连板股 =====
-    # 今日涨停 + 非ST
-    # 优先从人气榜取，不足20则从全部涨停股补充
+    # 今日涨停 + 10日内接近3个月高点 + 非ST + 主板
     lianban = []
-    for item in renqi_data:
-        code = item["code"]
-        name = item["name"]
+    for s in zt_today:
+        code = s["code"]
+        name = s["name"]
         
-        if code not in zt_today_codes:
-            continue
         if filter_st(name):
             continue
+        if not is_main_board(code):
+            continue
+        if not check_near_high(code, days=10):
+            continue
         
-        zt_info = zt_today_map[code]
+        rank_info = hotness_rank.get(code, (9999, "", s.get("change_pct", 0)))
         lianban.append({
             "name": name,
             "code": code,
-            "change_pct": zt_info.get("change_pct", item.get("change_pct", 0)),
-            "lbc": zt_info.get("lbc", 0),
-            "mark": item.get("mark", ""),
-            "rank": item["rank"],
+            "change_pct": s.get("change_pct", 0),
+            "lbc": s.get("lbc", 0),
+            "mark": rank_info[1],
+            "rank": rank_info[0],
         })
-    
-    # 如果人气榜中不足20只，从全部涨停股中补充（按连板数降序）
-    if len(lianban) < 20:
-        existing_codes = set(s["code"] for s in lianban)
-        extra = []
-        for s in zt_today:
-            if s["code"] in existing_codes:
-                continue
-            if filter_st(s["name"]):
-                continue
-            extra.append({
-                "name": s["name"],
-                "code": s["code"],
-                "change_pct": s.get("change_pct", 0),
-                "lbc": s.get("lbc", 0),
-                "mark": f"{s.get('lbc', 0)}连板" if s.get('lbc', 0) > 1 else "首板",
-                "rank": 999,
-            })
-        extra.sort(key=lambda x: (-x["lbc"], x["code"]))
-        lianban.extend(extra[:20 - len(lianban)])
     
     lianban.sort(key=lambda x: x["rank"])
     lianban = lianban[:20]
     print(f"[筛选] 连板股: {len(lianban)} 只")
     
     # ===== 条件2：回调股 =====
-    # 今日上涨（涨幅>0）且涨8%以内 + 非ST + 20日内有涨停
-    # 放宽：从人气榜取涨8%以内的，不足20则放宽到涨10%以内
-    huiluo = []
-    checked_codes = set()
+    # 今日涨0-8% + 成交额放大 + 20日内有涨停 + 20日内接近3个月高点 + 非ST + 主板
+    # 从全量近20日涨停池筛选，换手率数据已在hotness_rank中
+    realtime_huiluo = get_batch_realtime(list(recent_zt_candidates.keys()))
     
-    # 第一轮：涨幅>0且涨8%以内
-    for item in renqi_data:
-        code = item["code"]
-        name = item["name"]
-        change_pct = item.get("change_pct", 0)
+    huiluo = []
+    for code, name in recent_zt_candidates.items():
+        rt = realtime_huiluo.get(code)
+        if not rt:
+            continue
         
+        change_pct = rt["change_pct"]
         if change_pct <= 0 or change_pct > 8.0:
             continue
         if filter_st(name):
             continue
+        if not is_main_board(code):
+            continue
+        # 20日内有涨停已经保证了（来自候选池）
+        if not check_near_high(code, days=20):
+            continue
+        if not check_volume_expand(code):
+            continue
         
-        if code not in checked_codes:
-            checked_codes.add(code)
-            had_zt = check_had_zt_in_days(code, days=20)
-            if not had_zt:
-                continue
-        
+        rank_info = hotness_rank.get(code, (9999, "", change_pct))
         huiluo.append({
             "name": name,
             "code": code,
             "change_pct": change_pct,
-            "mark": item.get("mark", ""),
-            "rank": item["rank"],
+            "mark": rank_info[1],
+            "rank": rank_info[0],
         })
-    
-    # 第二轮：如果不足20只，放宽到涨10%以内（排除涨停股）
-    if len(huiluo) < 20:
-        for item in renqi_data:
-            code = item["code"]
-            name = item["name"]
-            change_pct = item.get("change_pct", 0)
-            
-            if change_pct <= 8.0 or change_pct > 10.0:
-                continue
-            if filter_st(name):
-                continue
-            if code in checked_codes:
-                continue
-            
-            checked_codes.add(code)
-            had_zt = check_had_zt_in_days(code, days=20)
-            if not had_zt:
-                continue
-            
-            huiluo.append({
-                "name": name,
-                "code": code,
-                "change_pct": change_pct,
-                "mark": item.get("mark", ""),
-                "rank": item["rank"],
-            })
-            if len(huiluo) >= 20:
-                break
-    
-    # 第三轮：如果还不足20只，去掉"20日内有涨停"条件，只取涨8%以内且上涨的热门股
-    if len(huiluo) < 20:
-        for item in renqi_data:
-            code = item["code"]
-            name = item["name"]
-            change_pct = item.get("change_pct", 0)
-            
-            if change_pct <= 0 or change_pct > 8.0:
-                continue
-            if filter_st(name):
-                continue
-            if any(h["code"] == code for h in huiluo):
-                continue
-            
-            huiluo.append({
-                "name": name,
-                "code": code,
-                "change_pct": change_pct,
-                "mark": item.get("mark", ""),
-                "rank": item["rank"],
-            })
-            if len(huiluo) >= 20:
-                break
     
     huiluo.sort(key=lambda x: x["rank"])
     huiluo = huiluo[:20]
     print(f"[筛选] 回调股: {len(huiluo)} 只")
     
     # ===== 条件3：断板股 =====
-    # 昨日涨停 + 今日未涨停 + 非ST
-    # 优先从人气榜取，不足20则从全部昨日涨停股补充
+    # 昨日涨停 + 今日未涨停 + 20日内接近3个月高点 + 非ST + 主板
     duanban = []
-    for item in renqi_data:
-        code = item["code"]
-        name = item["name"]
+    for s in zt_yesterday:
+        code = s["code"]
+        name = s["name"]
         
-        if code not in zt_yesterday_codes:
-            continue
         if code in zt_today_codes:
             continue
         if filter_st(name):
             continue
+        if not is_main_board(code):
+            continue
+        if not check_near_high(code, days=20):
+            continue
         
-        yt_info = zt_yesterday_map[code]
+        rank_info = hotness_rank.get(code, (9999, "", 0))
         duanban.append({
             "name": name,
             "code": code,
-            "change_pct": item.get("change_pct", 0),
-            "yesterday_lbc": yt_info.get("lbc", 0),
-            "mark": item.get("mark", ""),
-            "rank": item["rank"],
+            "change_pct": rank_info[2],
+            "yesterday_lbc": s.get("lbc", 0),
+            "mark": rank_info[1],
+            "rank": rank_info[0],
         })
-    
-    # 如果人气榜中不足20只，从全部昨日涨停股中补充
-    if len(duanban) < 20:
-        existing_codes = set(s["code"] for s in duanban)
-        extra = []
-        for s in zt_yesterday:
-            if s["code"] in existing_codes:
-                continue
-            if s["code"] in zt_today_codes:
-                continue
-            if filter_st(s["name"]):
-                continue
-            extra.append({
-                "name": s["name"],
-                "code": s["code"],
-                "change_pct": 0,
-                "yesterday_lbc": s.get("lbc", 0),
-                "mark": f"昨日{s.get('lbc', 0)}连板" if s.get('lbc', 0) > 1 else "昨日首板",
-                "rank": 999,
-            })
-        extra.sort(key=lambda x: (-x["yesterday_lbc"], x["code"]))
-        duanban.extend(extra[:20 - len(duanban)])
     
     duanban.sort(key=lambda x: x["rank"])
     duanban = duanban[:20]
@@ -812,7 +894,7 @@ def main():
     
     # ===== Step 2: 执行筛选 =====
     print("\n[Step 4] 执行筛选条件...")
-    data = run_filters(renqi_data, zt_today, zt_yesterday)
+    data = run_filters(renqi_data, zt_today, zt_yesterday, date_str)
     
     # ===== Step 3: 生成图片 =====
     print("\n[Step 5] 生成图片...")
