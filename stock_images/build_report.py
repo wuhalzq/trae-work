@@ -412,42 +412,43 @@ def generate_pdf(data, output_path):
     return output_path
 
 # ============== 企业微信推送 ==============
-def push_to_wecom(file_path, webhook_url):
+WEBHOOK_KEY = "c62953cf-031b-4d0e-a99f-513593e55771"
+UPLOAD_URL = f"https://qyapi.weixin.qq.com/cgi-bin/webhook/upload_media?key={WEBHOOK_KEY}&type=file"
+SEND_URL = f"https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key={WEBHOOK_KEY}"
+
+def push_to_wecom(file_path):
     """通过企业微信Webhook推送文件"""
     try:
-        # 上传文件获取media_id
-        upload_url = f"{webhook_url}&type=file"
-        
+        # 第一步：上传文件获取media_id
         with open(file_path, 'rb') as f:
             files = {'file': (os.path.basename(file_path), f, 'application/pdf')}
-            response = requests.post(upload_url, files=files, timeout=30)
+            response = requests.post(UPLOAD_URL, files=files, timeout=30)
         
         result = response.json()
         print(f"上传结果: {result}")
         
-        if result.get('errcode') == 0:
-            media_id = result.get('media_id')
-            
-            # 发送文件消息
-            send_url = webhook_url
-            payload = {
-                "msgtype": "file",
-                "file": {
-                    "media_id": media_id
-                }
-            }
-            
-            response = requests.post(send_url, json=payload, timeout=30)
-            result = response.json()
-            
-            if result.get('errcode') == 0:
-                print("✅ 文件推送成功!")
-                return True
-            else:
-                print(f"❌ 发送失败: {result}")
-                return False
-        else:
+        if result.get('errcode') != 0:
             print(f"❌ 上传失败: {result}")
+            return False
+        
+        media_id = result.get('media_id')
+        
+        # 第二步：用media_id发送文件消息（注意send_url和upload_url不同）
+        payload = {
+            "msgtype": "file",
+            "file": {
+                "media_id": media_id
+            }
+        }
+        
+        response = requests.post(SEND_URL, json=payload, timeout=30)
+        result = response.json()
+        
+        if result.get('errcode') == 0:
+            print("✅ 文件推送成功!")
+            return True
+        else:
+            print(f"❌ 发送失败: {result}")
             return False
             
     except Exception as e:
@@ -478,14 +479,13 @@ def main():
     generate_pdf(data, output_path)
     
     # 推送
-    webhook_url = "https://qyapi.weixin.qq.com/cgi-bin/webhook/upload_media?key=c62953cf-031b-4d0e-a99f-513593e55771&type=file"
-    
     print("\n开始推送PDF...")
-    push_success = push_to_wecom(output_path, webhook_url)
+    push_success = push_to_wecom(output_path)
     
     if not push_success:
         print("\n⚠️ 自动推送失败，请手动执行以下命令:")
-        print(f'curl -F "file=@{output_path}" "https://qyapi.weixin.qq.com/cgi-bin/webhook/upload_media?key=c62953cf-031b-4d0e-a99f-513593e55771&type=file"')
+        print(f'curl -F "file=@{output_path}" "{UPLOAD_URL}"')
+        print(f'然后用返回的media_id发送: curl -X POST "{SEND_URL}" -H "Content-Type: application/json" -d \'{{"msgtype":"file","file":{{"media_id":"MEDIA_ID"}}}}\'''')
 
 if __name__ == "__main__":
     main()
