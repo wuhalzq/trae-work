@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-A股短线复盘PDF生成器
+A股短线复盘PDF生成器（增强版）
+含：情绪周期判定 + 龙头板块/个股 + 两模式操作建议
 生成专业复盘报告并通过企业微信Webhook推送
 """
 
@@ -108,6 +109,10 @@ def get_styles():
             'TableBody', fontName=CJK_FONT, fontSize=9, leading=13,
             wordWrap='CJK', alignment=TA_CENTER
         ),
+        'table_body_small': ParagraphStyle(
+            'TableBodySmall', fontName=CJK_FONT, fontSize=8, leading=11,
+            wordWrap='CJK', alignment=TA_CENTER
+        ),
         'positive': ParagraphStyle(
             'Positive', fontName=CJK_FONT, fontSize=9, leading=13,
             textColor=GREEN_COLOR, wordWrap='CJK', alignment=TA_CENTER
@@ -115,6 +120,10 @@ def get_styles():
         'negative': ParagraphStyle(
             'Negative', fontName=CJK_FONT, fontSize=9, leading=13,
             textColor=RED_COLOR, wordWrap='CJK', alignment=TA_CENTER
+        ),
+        'red_text': ParagraphStyle(
+            'RedText', fontName=CJK_FONT, fontSize=12, leading=18,
+            textColor=RED_COLOR, spaceAfter=8, wordWrap='CJK'
         ),
     }
 
@@ -184,6 +193,42 @@ def create_table(data, col_widths=None, style=None):
     table.setStyle(TableStyle(ts))
     return table
 
+def create_table_ex(data, col_widths=None, header_color=None, small_font=False):
+    """创建表格（支持自定义表头颜色和小字体）"""
+    if not data:
+        return None
+    styles = get_styles()
+    body_style = styles['table_body_small'] if small_font else styles['table_body']
+    wrapped_data = []
+    for i, row in enumerate(data):
+        wrapped_row = []
+        cell_style = styles['table_header'] if i == 0 else body_style
+        for cell in row:
+            cell_str = str(cell) if cell is not None else ""
+            cell_str = normalize_text(cell_str)
+            wrapped_row.append(Paragraph(cell_str, cell_style))
+        wrapped_data.append(wrapped_row)
+
+    table = Table(wrapped_data, colWidths=col_widths, repeatRows=1)
+    hdr_color = header_color if header_color else ACCENT_COLOR
+    ts = [
+        ('BACKGROUND', (0, 0), (-1, 0), hdr_color),
+        ('TEXTCOLOR', (0, 0), (-1, 0), HexColor('#ffffff')),
+        ('FONTNAME', (0, 0), (-1, -1), CJK_FONT),
+        ('FONTSIZE', (0, 0), (-1, 0), 10),
+        ('FONTSIZE', (0, 1), (-1, -1), 8 if small_font else 9),
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+        ('TOPPADDING', (0, 0), (-1, 0), 8),
+        ('BOTTOMPADDING', (0, 1), (-1, -1), 5),
+        ('TOPPADDING', (0, 1), (-1, -1), 5),
+        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [LIGHT_BG, HexColor('#ffffff')]),
+        ('GRID', (0, 0), (-1, -1), 0.5, HexColor('#e2e8f0')),
+    ]
+    table.setStyle(TableStyle(ts))
+    return table
+
 # ============== 分隔线 ==============
 class Divider:
     """分隔线"""
@@ -204,8 +249,6 @@ def add_divider(width, height=1, color=HexColor('#e2e8f0'), space_before=6, spac
     """添加分隔线"""
     story = []
     story.append(Spacer(1, space_before))
-    
-    # 简单实现：使用带背景色的段落模拟分隔线
     divider_style = ParagraphStyle(
         'Divider', fontName=CJK_FONT, fontSize=height,
         textColor=color, spaceBefore=0, spaceAfter=0
@@ -216,10 +259,9 @@ def add_divider(width, height=1, color=HexColor('#e2e8f0'), space_before=6, spac
 
 # ============== PDF生成 ==============
 def generate_pdf(data, output_path):
-    """生成PDF报告"""
+    """生成PDF报告（增强版：含情绪周期+龙头板块+两模式操作建议）"""
     styles = get_styles()
-    
-    # 页面设置
+
     doc = SimpleDocTemplate(
         output_path,
         pagesize=A4,
@@ -228,47 +270,38 @@ def generate_pdf(data, output_path):
         topMargin=0.6*inch,
         bottomMargin=0.6*inch,
     )
-    
+
     story = []
     content_width = A4[0] - 1.2*inch
-    
+
     # ========== 封面 ==========
     story.append(Spacer(1, 0.8*inch))
     story.append(Paragraph(normalize_text(f"A股短线复盘"), styles['title']))
     story.append(Paragraph(normalize_text(data.get('date', '')), styles['subtitle']))
     story.append(Spacer(1, 0.3*inch))
-    
-    # 副标题
     current_time = datetime.now().strftime('%Y-%m-%d %H:%M')
     story.append(Paragraph(normalize_text(f"生成时间: {current_time}"), styles['small']))
     story.append(PageBreak())
-    
-    # ========== 大盘概况 ==========
+
+    # ========== 一、大盘概况 ==========
     story.append(Paragraph(normalize_text("一、大盘概况"), styles['h1']))
     for _ in add_divider(content_width):
         story.append(_)
-    
-    # 指数表格
     index_data = data.get('index', [])
     if index_data:
         index_table = create_table(index_data, col_widths=[1.8*inch, 1.4*inch, 1.2*inch, 1.2*inch])
         if index_table:
             story.append(index_table)
             story.append(Spacer(1, 0.15*inch))
-    
-    # 大盘描述
     market_summary = data.get('market_summary', '')
     if market_summary:
         story.append(Paragraph(normalize_text(market_summary), styles['body']))
-    
     story.append(Spacer(1, 0.15*inch))
-    
-    # ========== 资金流向 ==========
+
+    # ========== 二、资金流向 ==========
     story.append(Paragraph(normalize_text("二、资金流向"), styles['h1']))
     for _ in add_divider(content_width):
         story.append(_)
-    
-    # 北向资金
     bx_data = data.get('bx', [])
     if bx_data:
         story.append(Paragraph(normalize_text("北向资金（沪深股通）"), styles['h2']))
@@ -276,128 +309,179 @@ def generate_pdf(data, output_path):
         if bx_table:
             story.append(bx_table)
             story.append(Spacer(1, 0.1*inch))
-    
-    # 主力资金
     zl_data = data.get('zl', [])
     if zl_data:
         story.append(Paragraph(normalize_text("主力资金板块净流入排名"), styles['h2']))
         zl_table = create_table(zl_data, col_widths=[1.8*inch, 1.4*inch, 2.4*inch])
         if zl_table:
             story.append(zl_table)
-    
     story.append(Spacer(1, 0.15*inch))
-    
-    # ========== 市场情绪 ==========
+
+    # ========== 三、市场情绪 ==========
     story.append(Paragraph(normalize_text("三、市场情绪"), styles['h1']))
     for _ in add_divider(content_width):
         story.append(_)
-    
-    # 情绪指标
     qx_data = data.get('qx', [])
     if qx_data:
         qx_table = create_table(qx_data, col_widths=[1.5*inch, 1.3*inch, 2.8*inch])
         if qx_table:
             story.append(qx_table)
             story.append(Spacer(1, 0.1*inch))
-    
-    # 情绪小结
     qx_summary = data.get('qx_summary', '')
     if qx_summary:
         story.append(Paragraph(normalize_text(qx_summary), styles['body']))
-    
     story.append(Spacer(1, 0.15*inch))
-    
-    # ========== 热点题材 ==========
-    story.append(Paragraph(normalize_text("四、热点题材"), styles['h1']))
+
+    # ========== 四、情绪周期判定（新增）==========
+    cycle_current = data.get('cycle_current', '')
+    if cycle_current:
+        story.append(Paragraph(normalize_text("四、情绪周期判定"), styles['h1']))
+        for _ in add_divider(content_width):
+            story.append(_)
+        story.append(Paragraph(normalize_text("当前周期：" + cycle_current), styles['red_text']))
+        # 本周情绪周期演进表
+        cycle_week = data.get('cycle_week', [])
+        if cycle_week:
+            story.append(Paragraph(normalize_text("本周情绪周期演进"), styles['h2']))
+            cw_table = create_table_ex(cycle_week, col_widths=[
+                content_width*0.09, content_width*0.07, content_width*0.07, content_width*0.08,
+                content_width*0.07, content_width*0.07, content_width*0.16, content_width*0.39], small_font=True)
+            if cw_table:
+                story.append(cw_table)
+            story.append(Spacer(1, 0.08*inch))
+        # 当日判定信号表
+        cycle_judgment = data.get('cycle_judgment', [])
+        if cycle_judgment:
+            story.append(Paragraph(normalize_text("当日判定信号"), styles['h2']))
+            cj_table = create_table_ex(cycle_judgment, col_widths=[
+                content_width*0.25, content_width*0.45, content_width*0.30])
+            if cj_table:
+                story.append(cj_table)
+            story.append(Spacer(1, 0.05*inch))
+        cycle_watch = data.get('cycle_watch', '')
+        if cycle_watch:
+            story.append(Paragraph(normalize_text(cycle_watch), styles['body']))
+        story.append(Spacer(1, 0.15*inch))
+
+    # ========== 五、龙头板块与龙头个股（新增）==========
+    strong_sectors = data.get('strong_sectors', [])
+    if strong_sectors:
+        story.append(Paragraph(normalize_text("五、龙头板块与龙头个股"), styles['h1']))
+        for _ in add_divider(content_width):
+            story.append(_)
+        story.append(Paragraph(normalize_text("强势板块（逆势/抗跌）"), styles['h2']))
+        ss_table = create_table_ex(strong_sectors, col_widths=[
+            content_width*0.15, content_width*0.08, content_width*0.30,
+            content_width*0.20, content_width*0.27], small_font=True)
+        if ss_table:
+            story.append(ss_table)
+        story.append(Spacer(1, 0.1*inch))
+        ladder = data.get('ladder', [])
+        if ladder:
+            story.append(Paragraph(normalize_text("连板梯队（市场高度锚点）"), styles['h2']))
+            ld_table = create_table_ex(ladder, col_widths=[
+                content_width*0.10, content_width*0.20, content_width*0.12,
+                content_width*0.28, content_width*0.30])
+            if ld_table:
+                story.append(ld_table)
+            story.append(Spacer(1, 0.1*inch))
+        risk_sectors = data.get('risk_sectors', [])
+        if risk_sectors:
+            story.append(Paragraph(normalize_text("退潮/风险板块（回避）"), styles['h2']))
+            rs_table = create_table_ex(risk_sectors, col_widths=[
+                content_width*0.18, content_width*0.15, content_width*0.22, content_width*0.45],
+                header_color=RED_COLOR)
+            if rs_table:
+                story.append(rs_table)
+        story.append(Spacer(1, 0.15*inch))
+
+    # ========== 六、热点题材 ==========
+    story.append(Paragraph(normalize_text("六、热点题材"), styles['h1']))
     for _ in add_divider(content_width):
         story.append(_)
-    
     themes = data.get('themes', [])
     for theme in themes:
         theme_title = theme.get('title', '')
         theme_logic = theme.get('logic', '')
         theme_stocks = theme.get('stocks', [])
-        
         if theme_title:
             story.append(Paragraph(normalize_text(theme_title), styles['h2']))
         if theme_logic:
             story.append(Paragraph(normalize_text(theme_logic), styles['body']))
         if theme_stocks:
-            # 主板标的表格
             stocks_header = [["个股", "代码", "今日表现", "定位"]]
             stocks_data = stocks_header + theme_stocks
             stocks_table = create_table(stocks_data, col_widths=[1.5*inch, 1.1*inch, 1.3*inch, 1.7*inch])
             if stocks_table:
                 story.append(stocks_table)
         story.append(Spacer(1, 0.08*inch))
-    
-    # ========== 消息面 ==========
-    story.append(Paragraph(normalize_text("五、消息面"), styles['h1']))
+
+    # ========== 七、消息面 ==========
+    story.append(Paragraph(normalize_text("七、消息面"), styles['h1']))
     for _ in add_divider(content_width):
         story.append(_)
-    
-    # 利空消息
     bad_news = data.get('bad_news', '')
     if bad_news:
         story.append(Paragraph(normalize_text("⚠️ 利空消息"), styles['h2']))
-        # 按换行分割
         for line in bad_news.split('\n'):
             if line.strip():
                 story.append(Paragraph(normalize_text("• " + line.strip()), styles['body']))
         story.append(Spacer(1, 0.1*inch))
-    
-    # 政策催化
     good_news = data.get('good_news', '')
     if good_news:
         story.append(Paragraph(normalize_text("✅ 政策催化"), styles['h2']))
         for line in good_news.split('\n'):
             if line.strip():
                 story.append(Paragraph(normalize_text("• " + line.strip()), styles['body']))
-    
     story.append(Spacer(1, 0.15*inch))
-    
-    # ========== 今日总结 ==========
-    story.append(Paragraph(normalize_text("六、今日总结"), styles['h1']))
+
+    # ========== 八、今日总结 ==========
+    story.append(Paragraph(normalize_text("八、今日总结"), styles['h1']))
     for _ in add_divider(content_width):
         story.append(_)
-    
-    # 核心特征
-    features = data.get('features', [])
+    features = data.get('features', '')
     if features:
         story.append(Paragraph(normalize_text("📌 今日核心特征"), styles['h2']))
-        for i, feature in enumerate(features, 1):
-            story.append(Paragraph(normalize_text(f"{i}. {feature}"), styles['body']))
+        if isinstance(features, str):
+            for line in features.split('\n'):
+                if line.strip():
+                    story.append(Paragraph(normalize_text("• " + line.strip()), styles['body']))
+        elif isinstance(features, list):
+            for i, feature in enumerate(features, 1):
+                story.append(Paragraph(normalize_text(f"{i}. {feature}"), styles['body']))
         story.append(Spacer(1, 0.1*inch))
-    
-    # 机会方向
-    opportunities = data.get('opportunities', [])
+    opportunities = data.get('opportunities', '')
     if opportunities:
         story.append(Paragraph(normalize_text("💡 机会方向"), styles['h2']))
-        for i, opp in enumerate(opportunities, 1):
-            story.append(Paragraph(normalize_text(f"{i}. {opp}"), styles['body']))
+        if isinstance(opportunities, str):
+            for line in opportunities.split('\n'):
+                if line.strip():
+                    story.append(Paragraph(normalize_text("• " + line.strip()), styles['body']))
+        elif isinstance(opportunities, list):
+            for i, opp in enumerate(opportunities, 1):
+                story.append(Paragraph(normalize_text(f"{i}. {opp}"), styles['body']))
         story.append(Spacer(1, 0.1*inch))
-    
-    # 风险提示
-    risks = data.get('risks', [])
+    risks = data.get('risks', '')
     if risks:
         story.append(Paragraph(normalize_text("⚠️ 风险提示"), styles['h2']))
-        for i, risk in enumerate(risks, 1):
-            story.append(Paragraph(normalize_text(f"{i}. {risk}"), styles['body']))
+        if isinstance(risks, str):
+            for line in risks.split('\n'):
+                if line.strip():
+                    story.append(Paragraph(normalize_text("• " + line.strip()), styles['body']))
+        elif isinstance(risks, list):
+            for i, risk in enumerate(risks, 1):
+                story.append(Paragraph(normalize_text(f"{i}. {risk}"), styles['body']))
         story.append(Spacer(1, 0.1*inch))
-    
-    # 操作策略
     strategy = data.get('strategy', '')
     if strategy:
         story.append(Paragraph(normalize_text("📋 操作策略"), styles['h2']))
         story.append(Paragraph(normalize_text(strategy), styles['body']))
-    
     story.append(PageBreak())
-    
-    # ========== 核心标的速览 ==========
-    story.append(Paragraph(normalize_text("七、核心标的速览"), styles['h1']))
+
+    # ========== 九、核心标的速览 ==========
+    story.append(Paragraph(normalize_text("九、核心标的速览"), styles['h1']))
     for _ in add_divider(content_width):
         story.append(_)
-    
     quick_data = data.get('quick', [])
     if quick_data:
         quick_header = [["层级", "个股", "代码", "今日表现"]]
@@ -405,7 +489,53 @@ def generate_pdf(data, output_path):
         quick_table = create_table(quick_table_data, col_widths=[1.0*inch, 1.5*inch, 1.1*inch, 2.0*inch])
         if quick_table:
             story.append(quick_table)
-    
+
+    # ========== 十、两模式操作建议与本周复盘反思（放最后）==========
+    has_mode = data.get('mode_today') or data.get('mode_speed') or data.get('week_reflection')
+    if has_mode:
+        story.append(PageBreak())
+        story.append(Paragraph(normalize_text("十、两模式操作建议与本周复盘反思"), styles['h1']))
+        for _ in add_divider(content_width):
+            story.append(_)
+
+        # 当日两模式操作建议
+        mode_today = data.get('mode_today', [])
+        if mode_today:
+            story.append(Paragraph(normalize_text("10.1 当日操作建议"), styles['h2']))
+            mt_table = create_table_ex(mode_today, col_widths=[
+                content_width*0.12, content_width*0.22, content_width*0.66],
+                header_color=RED_COLOR)
+            if mt_table:
+                story.append(mt_table)
+            story.append(Spacer(1, 0.1*inch))
+
+        # 各情绪周期两模式操作建议速查表（永久参考）
+        mode_speed = data.get('mode_speed', [])
+        if mode_speed:
+            story.append(Paragraph(normalize_text("10.2 各情绪周期两模式操作建议速查表（永久参考）"), styles['h2']))
+            # 根据列数自动适配宽度（7列：周期/判断依据/打板操作/打板仓位/龙回头操作/龙回头仓位/2万本金参考）
+            num_cols = len(mode_speed[0]) if mode_speed else 5
+            if num_cols >= 7:
+                ms_widths = [content_width*0.08, content_width*0.16, content_width*0.16,
+                             content_width*0.12, content_width*0.18, content_width*0.12, content_width*0.18]
+            else:
+                ms_widths = [content_width*0.15, content_width*0.22, content_width*0.15,
+                             content_width*0.28, content_width*0.20]
+            ms_table = create_table_ex(mode_speed, col_widths=ms_widths, small_font=True)
+            if ms_table:
+                story.append(ms_table)
+            story.append(Spacer(1, 0.1*inch))
+
+        # 本周复盘反思
+        week_reflection = data.get('week_reflection', [])
+        if week_reflection:
+            story.append(Paragraph(normalize_text("10.3 本周复盘反思（两模式对照）"), styles['h2']))
+            wr_table = create_table_ex(week_reflection, col_widths=[
+                content_width*0.10, content_width*0.12, content_width*0.28,
+                content_width*0.30, content_width*0.20], small_font=True)
+            if wr_table:
+                story.append(wr_table)
+
     # ========== 生成PDF ==========
     doc.build(story)
     print(f"PDF已生成: {output_path}")
@@ -433,7 +563,7 @@ def push_to_wecom(file_path):
         
         media_id = result.get('media_id')
         
-        # 第二步：用media_id发送文件消息（注意send_url和upload_url不同）
+        # 第二步：用media_id发送文件消息
         payload = {
             "msgtype": "file",
             "file": {
@@ -489,5 +619,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-# sync test 1782127182
-# sync test 1782127210
