@@ -1209,7 +1209,7 @@ def create_stock_image(title, stocks, filename, date_str):
     
     # 底部
     draw.rectangle([(0, height-50), (width, height)], fill='#16213e')
-    footer_text = f"数据日期: {date_str} | 来源: 同花顺/东方财富"
+    footer_text = f"数据日期: {date_str}"
     bbox = draw.textbbox((0, 0), footer_text, font=small_font)
     footer_w = bbox[2] - bbox[0]
     draw.text(((width - footer_w) // 2, height-38), footer_text, fill='#888888', font=small_font)
