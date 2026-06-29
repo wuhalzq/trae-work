@@ -490,51 +490,65 @@ def generate_pdf(data, output_path):
         if quick_table:
             story.append(quick_table)
 
-    # ========== 十、两模式操作建议与本周复盘反思（放最后）==========
-    has_mode = data.get('mode_today') or data.get('mode_speed') or data.get('week_reflection')
-    if has_mode:
-        story.append(PageBreak())
-        story.append(Paragraph(normalize_text("十、两模式操作建议与本周复盘反思"), styles['h1']))
-        for _ in add_divider(content_width):
-            story.append(_)
+    # ========== 十、两模式操作建议与本周复盘反思（放最后，始终显示）==========
+    # 内置默认速查表（防止执行session遗漏mode_speed字段时PDF缺失速查表）
+    DEFAULT_MODE_SPEED = [
+        ["周期阶段", "判断依据", "打板接力·操作", "打板·仓位", "龙回头·操作", "龙回头·仓位", "2万本金参考"],
+        ["冰点期", "涨停<50只，连板<=2板，跌停>涨停，炸板率高", "空仓，极小仓试错新题材首板", "0-2成/快进快出", "空仓，无达标标的", "0", "0元，空仓等机会"],
+        ["启动期", "涨停60-80只，连板突破3-4板，主线未明确", "轻仓试错首板/1进2", "1-3成/严格止损", "可做上一轮总龙头回头", "1-2成/10日线止损", "2000-4000元，轻仓试探"],
+        ["发酵期", "涨停80-120只，连板4-5板，梯队成型", "加仓接力龙头2进3/3进4", "3-5成/5日线止损", "标的增多，可做断板回调龙头", "2-3成/10日线止损", "4000-6000元，小仓参与"],
+        ["高潮期", "涨停120+只，连板6-8板+，封板率80%+", "重仓死磕龙头，捂股为王", "5-8成/不断板不减", "无标的可用（龙头还在连板）", "—", "打板可重仓1-1.5万"],
+        ["分歧/退潮初期", "涨停持续减少，龙头首次断板，炸板增多", "减仓落袋，仅做首阴反包", "1-2成/严格止损", "黄金窗口！三信号齐全可重仓", "5-6成/10日线止损", "1-1.2万重仓，止损亏约1000元"],
+        ["退潮深化期", "涨停<80只，连板高度持续压缩，跌停激增", "空仓避险，杜绝抄底", "0-1成", "大幅降频，只做最强总龙头", "1成/收紧至入场低点-3%", "2000元，快进快出"],
+        ["退潮期末期", "涨停持续降，5/10日线破位，亏钱效应扩散", "空仓", "0", "空仓等待冰点信号", "0", "0元，空仓等待"],
+    ]
 
-        # 当日两模式操作建议
-        mode_today = data.get('mode_today', [])
-        if mode_today:
-            story.append(Paragraph(normalize_text("10.1 当日操作建议"), styles['h2']))
-            mt_table = create_table_ex(mode_today, col_widths=[
-                content_width*0.12, content_width*0.22, content_width*0.66],
-                header_color=RED_COLOR)
-            if mt_table:
-                story.append(mt_table)
-            story.append(Spacer(1, 0.1*inch))
+    story.append(PageBreak())
+    story.append(Paragraph(normalize_text("十、两模式操作建议与本周复盘反思"), styles['h1']))
+    for _ in add_divider(content_width):
+        story.append(_)
 
-        # 各情绪周期两模式操作建议速查表（永久参考）
-        mode_speed = data.get('mode_speed', [])
-        if mode_speed:
-            story.append(Paragraph(normalize_text("10.2 各情绪周期两模式操作建议速查表（永久参考）"), styles['h2']))
-            # 根据列数自动适配宽度（7列：周期/判断依据/打板操作/打板仓位/龙回头操作/龙回头仓位/2万本金参考）
-            num_cols = len(mode_speed[0]) if mode_speed else 5
-            if num_cols >= 7:
-                ms_widths = [content_width*0.08, content_width*0.16, content_width*0.16,
-                             content_width*0.12, content_width*0.18, content_width*0.12, content_width*0.18]
-            else:
-                ms_widths = [content_width*0.15, content_width*0.22, content_width*0.15,
-                             content_width*0.28, content_width*0.20]
-            ms_table = create_table_ex(mode_speed, col_widths=ms_widths, small_font=True)
-            if ms_table:
-                story.append(ms_table)
-            story.append(Spacer(1, 0.1*inch))
+    # 当日两模式操作建议
+    mode_today = data.get('mode_today', [])
+    if mode_today:
+        story.append(Paragraph(normalize_text("10.1 当日操作建议"), styles['h2']))
+        mt_table = create_table_ex(mode_today, col_widths=[
+            content_width*0.12, content_width*0.22, content_width*0.66],
+            header_color=RED_COLOR)
+        if mt_table:
+            story.append(mt_table)
+        story.append(Spacer(1, 0.1*inch))
+    else:
+        # 默认提示
+        story.append(Paragraph(normalize_text("10.1 当日操作建议"), styles['h2']))
+        story.append(Paragraph(normalize_text("（请根据当前情绪周期参考下方速查表）"), styles['body']))
+        story.append(Spacer(1, 0.1*inch))
 
-        # 本周复盘反思
-        week_reflection = data.get('week_reflection', [])
-        if week_reflection:
-            story.append(Paragraph(normalize_text("10.3 本周复盘反思（两模式对照）"), styles['h2']))
-            wr_table = create_table_ex(week_reflection, col_widths=[
-                content_width*0.10, content_width*0.12, content_width*0.28,
-                content_width*0.30, content_width*0.20], small_font=True)
-            if wr_table:
-                story.append(wr_table)
+    # 各情绪周期两模式操作建议速查表（永久参考，始终显示）
+    # 如果JSON提供了mode_speed则用提供的，否则用内置默认值
+    mode_speed = data.get('mode_speed', []) or DEFAULT_MODE_SPEED
+    story.append(Paragraph(normalize_text("10.2 各情绪周期两模式操作建议速查表（永久参考）"), styles['h2']))
+    num_cols = len(mode_speed[0]) if mode_speed else 5
+    if num_cols >= 7:
+        ms_widths = [content_width*0.08, content_width*0.16, content_width*0.16,
+                     content_width*0.12, content_width*0.18, content_width*0.12, content_width*0.18]
+    else:
+        ms_widths = [content_width*0.15, content_width*0.22, content_width*0.15,
+                     content_width*0.28, content_width*0.20]
+    ms_table = create_table_ex(mode_speed, col_widths=ms_widths, small_font=True)
+    if ms_table:
+        story.append(ms_table)
+    story.append(Spacer(1, 0.1*inch))
+
+    # 本周复盘反思
+    week_reflection = data.get('week_reflection', [])
+    if week_reflection:
+        story.append(Paragraph(normalize_text("10.3 本周复盘反思（两模式对照）"), styles['h2']))
+        wr_table = create_table_ex(week_reflection, col_widths=[
+            content_width*0.10, content_width*0.12, content_width*0.28,
+            content_width*0.30, content_width*0.20], small_font=True)
+        if wr_table:
+            story.append(wr_table)
 
     # ========== 生成PDF ==========
     doc.build(story)
