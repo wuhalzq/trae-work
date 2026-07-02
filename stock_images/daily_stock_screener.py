@@ -687,7 +687,7 @@ def run_filters(renqi_data, zt_today, zt_yesterday, date_str):
     print(f"[筛选] 连板股: {len(lianban)} 只")
     
     # ===== 条件2：回调股 =====
-    # 今日涨0-8% + 成交额放大 + 20日内有涨停 + 20日内接近3个月高点 + 非ST + 主板
+    # 今日涨0-8% + 今日未涨停 + 昨日未涨停 + 成交额放大 + 20日内有涨停 + 20日内接近3个月高点 + 非ST + 主板
     # 从全量近20日涨停池筛选，换手率数据已在hotness_rank中
     realtime_huiluo = get_batch_realtime(list(recent_zt_candidates.keys()))
     
@@ -699,6 +699,12 @@ def run_filters(renqi_data, zt_today, zt_yesterday, date_str):
         
         change_pct = rt["change_pct"]
         if change_pct <= 0 or change_pct > 8.0:
+            continue
+        # 排除今日涨停的股票（涨停股应在连板列表中，不属于回调）
+        if code in zt_today_codes:
+            continue
+        # 排除昨日涨停的股票（昨日涨停今日未涨停属于断板，不属于回调）
+        if code in zt_yesterday_codes:
             continue
         if filter_st(name):
             continue
