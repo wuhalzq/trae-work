@@ -863,6 +863,323 @@ def create_stock_image(title, stocks, filename, date_str):
     print(f"已生成: {filename}")
     return filename
 
+# ========== N字反包选股（第四类，新增，不改动原有三类逻辑）==========
+
+# 热门概念板块映射
+HOT_SECTORS_NZI = {
+    "化工/氟化工": ["化学制品", "化学原料", "农化制品", "塑料", "橡胶", "非金属材料"],
+    "创新药/医药": ["化学制药", "生物制品", "医疗服务", "医疗器械", "中药", "医药商业"],
+    "机器人/汽零": ["汽车零部", "自动化设备", "通用设备", "专用设备", "电机", "金属新材"],
+    "消费电子/光刻胶": ["消费电子", "光学光电", "元件", "半导体", "其他电子"],
+    "通信/算力": ["通信设备", "IT服务", "软件开发", "计算机设备"],
+    "电网/电力": ["电网设备", "电力", "其他电源", "风电设备", "光伏设备"],
+    "有色/资源": ["贵金属", "工业金属", "小金属", "能源金属", "冶炼"],
+    "家电/家居": ["家电零部", "白色家电", "家居用品"],
+    "军工": ["航空装备", "军工电子", "航天装备"],
+    "物流": ["物流"],
+    "食品饮料": ["非白酒", "饮料乳品", "食品加工", "化妆品"],
+}
+
+
+def get_nzi_realtime_detail(codes):
+    """
+    批量获取实时行情（含PE、成交额）
+    腾讯API: parts[39]=PE, parts[37]=成交额(万元), parts[38]=换手率
+    """
+    if not codes:
+        return {}
+    tc_list = [f'sh{c}' if c.startswith('6') else f'sz{c}' for c in codes]
+    result = {}
+    batch_size = 50
+    for i in range(0, len(tc_list), batch_size):
+        batch = tc_list[i:i + batch_size]
+        url = "https://qt.gtimg.cn/q=" + ",".join(batch)
+        try:
+            resp = requests.get(url, headers=HEADERS, timeout=10)
+            for line in resp.text.strip().split("\n"):
+                if "=" not in line:
+                    continue
+                val = line.split("=", 1)[1].strip().strip('"').strip(";")
+                parts = val.split("~")
+                if len(parts) >= 39:
+                    code = parts[2]
+                    pe = 0
+                    try:
+                        pe = float(parts[39]) if len(parts) > 39 and parts[39] else 0
+                    except (ValueError, TypeError):
+                        pe = 0
+                    amount_wan = 0
+                    try:
+                        amount_wan = float(parts[37]) if len(parts) > 37 and parts[37] else 0
+                    except (ValueError, TypeError):
+                        amount_wan = 0
+                    result[code] = {
+                        "name": parts[1],
+                        "price": float(parts[3]) if parts[3] else 0,
+                        "change_pct": float(parts[32]) if len(parts) > 32 and parts[32] else 0,
+                        "pe": pe,
+                        "amount_yi": amount_wan / 10000,  # 万元→亿元
+                        "turnover_rate": float(parts[38]) if len(parts) > 38 and parts[38] else 0,
+                    }
+            time.sleep(0.3)
+        except Exception as e:
+            print(f"[N字反包] 行情查询失败: {e}")
+    return result
+
+
+def get_nzi_recent_zt_dates(date_str, num_days=4):
+    """获取最近N个交易日的日期列表（跳过周末）"""
+    today = datetime.strptime(date_str, "%Y%m%d")
+    dates = []
+    checked = 0
+    offset = 0
+    while len(dates) < num_days and checked < num_days + 10:
+        offset += 1
+        d = today - timedelta(days=offset)
+        if d.weekday() >= 5:
+            continue
+        dates.append(d.strftime("%Y%m%d"))
+        checked += 1
+    return dates
+
+
+def get_nzi_zt_pool(date_str):
+    """获取涨停板数据（含hybk行业板块字段）"""
+    url = "https://push2ex.eastmoney.com/getTopicZTPool"
+    params = {
+        "ut": "7eea3edcaed734bea9cbfc24409ed989",
+        "dpt": "wz.ztzt",
+        "Pageindex": "0",
+        "Pagesize": "500",
+        "sort": "fbt:asc",
+        "date": date_str,
+        "_": str(int(time.time() * 1000)),
+    }
+    try:
+        resp = requests.get(url, params=params, headers=HEADERS, timeout=15)
+        data = resp.json()
+        if not data.get("data") or not data["data"].get("pool"):
+            return []
+        result = []
+        for item in data["data"]["pool"]:
+            name = item.get("n", "")
+            if "ST" in name:
+                continue
+            code = item.get("c", "")
+            lbc = item.get("lbc", 0)
+            if isinstance(lbc, str):
+                try:
+                    lbc = int(lbc)
+                except:
+                    lbc = 0
+            result.append({
+                "code": code,
+                "name": name,
+                "lbc": lbc,
+                "hybk": item.get("hybk", ""),
+            })
+        return result
+    except Exception as e:
+        print(f"[N字反包] 获取{date_str}涨停板失败: {e}")
+        return []
+
+
+def run_nzi_filter(date_str, max_count=20):
+    """
+    N字反包选股（V2逻辑，满分30分评分）
+    条件：主板 + 近4天有涨停且今天断板 + 断板≥2天 + 上升趋势 + 缩量企稳MA5 + 不破MA10 + 热门概念
+    返回: list[dict]（含name, code, score等，兼容create_stock_image）
+    """
+    print("\n[N字反包] 开始筛选...")
+
+    recent_dates = get_nzi_recent_zt_dates(date_str, num_days=4)
+    print(f"[N字反包] 回溯日期: {recent_dates}")
+
+    all_zt = {}
+    sector_zt_count = {}
+
+    for d in recent_dates:
+        pool = get_nzi_zt_pool(d)
+        print(f"[N字反包] {d}: {len(pool)} 只涨停")
+        for item in pool:
+            code = item["code"]
+            hybk = item.get("hybk", "")
+            if code not in all_zt:
+                all_zt[code] = {"name": item["name"], "zt_dates": [d],
+                                "lbc_max": item["lbc"], "hybk": hybk}
+            else:
+                all_zt[code]["zt_dates"].append(d)
+                all_zt[code]["lbc_max"] = max(all_zt[code]["lbc_max"], item["lbc"])
+            if hybk:
+                sector_zt_count[hybk] = sector_zt_count.get(hybk, 0) + 1
+        time.sleep(0.5)
+
+    today_pool = get_nzi_zt_pool(date_str)
+    today_zt_codes = set(item["code"] for item in today_pool)
+
+    candidates = []
+    for code, info in all_zt.items():
+        if code in today_zt_codes:
+            continue
+        if not is_main_board(code):
+            continue
+        candidates.append({"code": code, "name": info["name"], "hybk": info["hybk"],
+                          "zt_dates": info["zt_dates"], "lbc_max": info["lbc_max"]})
+
+    print(f"[N字反包] 断板候选: {len(candidates)} 只")
+
+    qualified = []
+    for c in candidates:
+        code = c["code"]
+        klines = get_stock_kline(code, days=30)
+        if not klines or len(klines) < 20:
+            continue
+
+        closes = [k["close"] for k in klines]
+        vols = [k["volume"] for k in klines]
+        lows = [k["low"] for k in klines]
+
+        zt_idx = -1
+        for i in range(len(klines) - 1, 0, -1):
+            chg = (closes[i] - closes[i-1]) / closes[i-1] * 100
+            if chg >= 9.8:
+                zt_idx = i
+                break
+        if zt_idx == -1:
+            continue
+
+        lianban = 0
+        for i in range(zt_idx, 0, -1):
+            chg = (closes[i] - closes[i-1]) / closes[i-1] * 100
+            if chg >= 9.8:
+                lianban += 1
+            else:
+                break
+
+        days_after = len(klines) - 1 - zt_idx
+        if days_after < 2:
+            continue
+
+        ma5 = sum(closes[-5:]) / 5
+        ma10 = sum(closes[-10:]) / 10
+        ma20 = sum(closes[-20:]) / 20
+
+        if not (ma5 > ma10 > ma20):
+            continue
+
+        price = closes[-1]
+        ma5_diff = (price - ma5) / ma5 * 100
+        if abs(ma5_diff) > 5:
+            continue
+
+        if lows[-1] < ma10 * 0.98:
+            continue
+
+        vol_recent_3 = sum(vols[-3:]) / 3
+        vol_zt = vols[zt_idx]
+        vol_ratio = vol_recent_3 / vol_zt if vol_zt > 0 else 1
+        if vol_ratio > 1.3:
+            continue
+
+        max_drop = 0
+        for i in range(zt_idx + 1, len(klines)):
+            drop = (closes[i] - closes[zt_idx]) / closes[zt_idx] * 100
+            max_drop = min(max_drop, drop)
+        if max_drop < -12:
+            continue
+
+        today_chg = (closes[-1] - closes[-2]) / closes[-2] * 100
+        if today_chg < -5:
+            continue
+
+        sector = c["hybk"] or ""
+        hot_cat = ""
+        for cat, keywords in HOT_SECTORS_NZI.items():
+            for kw in keywords:
+                if kw in sector:
+                    hot_cat = cat
+                    break
+            if hot_cat:
+                break
+        if not hot_cat:
+            continue
+
+        rt_data = get_nzi_realtime_detail([code])
+        r = rt_data.get(code, {})
+        pe = r.get("pe", 0)
+        amount = r.get("amount_yi", 0)
+        turnover = r.get("turnover_rate", 0)
+
+        # ===== 评分（满分30）=====
+        score = 0
+        if 2 <= days_after <= 4:
+            score += 3
+        elif days_after >= 5:
+            score += 1
+        if abs(ma5_diff) <= 3:
+            score += 3
+        elif abs(ma5_diff) <= 5:
+            score += 1
+        if vol_ratio < 0.7:
+            score += 3
+        elif vol_ratio < 1.0:
+            score += 2
+        elif vol_ratio < 1.2:
+            score += 1
+        if lianban >= 2:
+            score += 2
+        if max_drop > -5:
+            score += 2
+        elif max_drop > -8:
+            score += 1
+        if price > ma10:
+            score += 1
+        if (ma5 - ma10) / ma10 * 100 > 1:
+            score += 1
+        if pe > 0:
+            if pe <= 20:
+                score += 4
+            elif pe <= 40:
+                score += 3
+            elif pe <= 80:
+                score += 2
+            elif pe <= 150:
+                score += 1
+        if amount >= 30:
+            score += 3
+        elif amount >= 10:
+            score += 2
+        elif amount >= 5:
+            score += 1
+        if 3 <= turnover <= 15:
+            score += 2
+        elif 1 <= turnover < 3 or 15 < turnover <= 20:
+            score += 1
+        same_sector = sector_zt_count.get(sector, 0)
+        if same_sector >= 5:
+            score += 3
+        elif same_sector >= 3:
+            score += 2
+        elif same_sector >= 2:
+            score += 1
+
+        qualified.append({
+            "name": c["name"], "code": code, "score": score,
+            "hot_cat": hot_cat, "pe": pe, "price": r.get("price", price),
+            "amount": amount, "turnover": turnover, "lianban": lianban,
+            "days_after": days_after, "today_chg": r.get("change_pct", today_chg),
+        })
+        time.sleep(0.1)
+
+    qualified.sort(key=lambda x: -x["score"])
+    result = qualified[:max_count]
+
+    print(f"[N字反包] 符合条件: {len(qualified)} 只，取前{len(result)}只")
+    for i, s in enumerate(result, 1):
+        print(f"  {i:02d}. {s['name']}({s['code']}) [{s['hot_cat']}] 评分:{s['score']}/30 PE:{s['pe']:.0f}")
+
+    return result
+
 # ========== 主流程 ==========
 
 def main():
@@ -909,16 +1226,22 @@ def main():
     lianban_img = create_stock_image("连板股", data["lianban"], f"{output_dir}/连板_{date_str}.png", date_display)
     huiluo_img = create_stock_image("回调股", data["huiluo"], f"{output_dir}/回调_{date_str}.png", date_display)
     duanban_img = create_stock_image("断板股", data["duanban"], f"{output_dir}/断板_{date_str}.png", date_display)
+
+    # ===== Step 5.2: N字反包选股（第四类，新增）=====
+    print("\n[Step 5.2] N字反包选股...")
+    nzi_stocks = run_nzi_filter(date_str)
+    nzi_img = create_stock_image("N字反包", nzi_stocks, f"{output_dir}/N字反包_{date_str}.png", date_display)
     
     # ===== Step 4: 推送图片 =====
     print("\n[Step 6] 推送图片...")
     send_image(lianban_img)
     send_image(huiluo_img)
     send_image(duanban_img)
+    send_image(nzi_img)
 
     print("\n=== 任务完成 ===")
     finish_time = get_beijing_now().strftime('%H:%M:%S')
-    print(f"{date_display} {finish_time} 任务执行完成 - 连板{len(data['lianban'])}只 | 回调{len(data['huiluo'])}只 | 断板{len(data['duanban'])}只")
+    print(f"{date_display} {finish_time} 任务执行完成 - 连板{len(data['lianban'])}只 | 回调{len(data['huiluo'])}只 | 断板{len(data['duanban'])}只 | N字反包{len(nzi_stocks)}只")
 
 if __name__ == "__main__":
     main()
