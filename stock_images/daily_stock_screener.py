@@ -475,11 +475,18 @@ def get_yesterday_zt_pool(date_str):
 
 # ========== 情绪周期分析模块 ==========
 
+# 市场宽度缓存，避免get_dieting_count等函数重复请求全市场数据
+_breadth_cache = None
+
 def get_market_breadth():
     """
     获取全市场涨跌家数统计
     返回: dict {up, down, flat, up5, down5, zt, dt, total}
     """
+    global _breadth_cache
+    if _breadth_cache is not None:
+        return _breadth_cache
+
     up = down = flat = up5 = down5 = zt = dt = 0
     total = 0
 
@@ -556,12 +563,53 @@ def get_market_breadth():
         except Exception as e:
             print(f"[市场宽度] 腾讯接口也失败: {e}")
 
+    # 如果东财和腾讯都失败，用新浪接口作为第三备选
+    if total == 0:
+        print("[市场宽度] 尝试新浪接口...")
+        try:
+            sina_headers = {
+                "User-Agent": "Mozilla/5.0",
+                "Referer": "https://finance.sina.com.cn/",
+            }
+            for page in range(1, 61):
+                url = (f"https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/"
+                       f"Market_Center.getHQNodeData?page={page}&num=100&sort=symbol&asc=1"
+                       f"&node=hs_a&symbol=&_s_r_a=auto")
+                resp = requests.get(url, headers=sina_headers, timeout=15)
+                items = resp.json()
+                if not items:
+                    break
+                for item in items:
+                    pct = item.get("changepercent")
+                    if pct is None:
+                        continue
+                    pct = float(pct)
+                    total += 1
+                    if pct > 0:
+                        up += 1
+                    elif pct < 0:
+                        down += 1
+                    else:
+                        flat += 1
+                    if pct >= 9.8:
+                        zt += 1
+                    if pct <= -9.8:
+                        dt += 1
+                    if pct >= 5:
+                        up5 += 1
+                    if pct <= -5:
+                        down5 += 1
+        except Exception as e:
+            print(f"[市场宽度] 新浪接口也失败: {e}")
+
     print(f"[市场宽度] 上涨{up} 下跌{down} 涨停{zt} 跌停{dt}")
-    return {
+    result = {
         "up": up, "down": down, "flat": flat,
         "up5": up5, "down5": down5,
         "zt": zt, "dt": dt, "total": total,
     }
+    _breadth_cache = result
+    return result
 
 
 def get_index_data():
@@ -607,6 +655,46 @@ def get_index_data():
             except Exception as e:
                 print(f"[指数] 腾讯接口获取{name}失败: {e}")
 
+    # 如果东财和腾讯都失败，用新浪指数接口作为第三备选
+    if not result:
+        print("[指数] 尝试新浪指数接口...")
+        sina_headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Referer": "https://finance.sina.com.cn/",
+        }
+        sina_indices = {
+            "sh000001": "上证指数",
+            "sz399001": "深证成指",
+            "sz399006": "创业板指",
+            "sh000688": "科创50",
+        }
+        try:
+            codes = ",".join(sina_indices.keys())
+            url = f"https://hq.sinajs.cn/list={codes}"
+            resp = requests.get(url, headers=sina_headers, timeout=10)
+            resp.encoding = "gbk"
+            for line in resp.text.strip().split("\n"):
+                # 格式: var hq_str_sh000001="上证指数,4031.34,4028.89,...";
+                m = re.search(r'hq_str_(\w+)="(.+)"', line)
+                if not m:
+                    continue
+                code = m.group(1)
+                content = m.group(2)
+                data = content.split(",")
+                if len(data) < 10:
+                    continue
+                name = sina_indices.get(code, data[0])
+                try:
+                    price = float(data[1])
+                    prev_close = float(data[2])
+                    amount = float(data[9]) / 100000000  # 成交额转为亿元
+                except (ValueError, IndexError):
+                    continue
+                pct = (price - prev_close) / prev_close * 100 if prev_close > 0 else 0
+                result[name] = {"price": price, "pct": pct, "amount": amount}
+        except Exception as e:
+            print(f"[指数] 新浪指数接口失败: {e}")
+
     return result
 
 
@@ -627,7 +715,9 @@ def get_zhaban_count(date_str):
         pool = data.get("data", {}).get("pool", [])
         return len(pool)
     except Exception:
-        return 0
+        # 炸板数据难以从新浪获取，返回-1表示数据不可用
+        # (返回0会被误认为"封板率100%"导致评分虚高)
+        return -1
 
 
 def get_dieting_count(date_str):
@@ -647,7 +737,15 @@ def get_dieting_count(date_str):
         pool = data.get("data", {}).get("pool", [])
         return len(pool)
     except Exception:
-        return 0
+        # 东财接口失败，从市场宽度获取跌停数（复用缓存避免重复请求全市场数据）
+        try:
+            breadth = get_market_breadth()
+            dt = breadth.get("dt", 0)
+            print(f"[跌停] 东财接口失败，从市场宽度获取跌停数: {dt}")
+            return dt
+        except Exception as e:
+            print(f"[跌停] fallback也失败: {e}")
+            return 0
 
 
 def analyze_sentiment_cycle(zt_today, zt_yesterday, breadth, zhaban, dieting):
@@ -659,7 +757,19 @@ def analyze_sentiment_cycle(zt_today, zt_yesterday, breadth, zhaban, dieting):
     dt_count = dieting
     up = breadth.get("up", 0)
     down = breadth.get("down", 0)
+    total = breadth.get("total", 0)
     zhaban_count = zhaban
+
+    # ===== 数据有效性校验 =====
+    data_quality = "正常"
+    # 跌停数据缺失: dt为0且有涨停股，但市场宽度接口失败(total=0)说明跌停数据缺失
+    dt_data_missing = (dt_count == 0 and zt_count > 0 and total == 0)
+    # 炸板数据不可用: 返回-1表示接口失败
+    zhaban_unavailable = (zhaban_count == -1)
+    # 涨跌数据缺失: 上涨下跌均为0
+    updown_data_missing = (up == 0 and down == 0)
+    if dt_data_missing or zhaban_unavailable or updown_data_missing:
+        data_quality = "部分数据缺失"
 
     # 连板高度
     max_lbc = max([s.get("lbc", 1) for s in zt_today], default=0)
@@ -670,11 +780,17 @@ def analyze_sentiment_cycle(zt_today, zt_yesterday, breadth, zhaban, dieting):
     jinji_count = len(yesterday_zt_codes & today_zt_codes)
     jinji_rate = jinji_count / len(yesterday_zt_codes) * 100 if yesterday_zt_codes else 0
 
-    # 炸板率
-    zhaban_rate = zhaban_count / (zt_count + zhaban_count) * 100 if (zt_count + zhaban_count) > 0 else 0
+    # 炸板率（数据不可用时标记为-1，不参与正常评分计算）
+    if zhaban_unavailable:
+        zhaban_rate = -1
+    else:
+        zhaban_rate = zhaban_count / (zt_count + zhaban_count) * 100 if (zt_count + zhaban_count) > 0 else 0
 
-    # 涨跌比
-    up_down_ratio = up / down if down > 0 else 99
+    # 涨跌比（数据缺失时不应计算为99，标记为-1）
+    if updown_data_missing:
+        up_down_ratio = -1
+    else:
+        up_down_ratio = up / down if down > 0 else 99
 
     # ===== 评分系统（0-100，越高越热） =====
     score = 0
@@ -692,7 +808,10 @@ def analyze_sentiment_cycle(zt_today, zt_yesterday, breadth, zhaban, dieting):
         score += 5
 
     # 跌停数 (0-20分，跌停越多分越低)
-    if dt_count <= 5:
+    if dt_data_missing:
+        # 数据缺失时给中等分，避免误判为"无跌停"满分导致评分虚高
+        score += 10
+    elif dt_count <= 5:
         score += 20
     elif dt_count <= 15:
         score += 15
@@ -728,7 +847,10 @@ def analyze_sentiment_cycle(zt_today, zt_yesterday, breadth, zhaban, dieting):
         score += 0
 
     # 涨跌比 (0-15分)
-    if up_down_ratio >= 3:
+    if updown_data_missing:
+        # 数据缺失时给中等分，避免误判为"涨跌比极高"满分导致评分虚高
+        score += 8
+    elif up_down_ratio >= 3:
         score += 15
     elif up_down_ratio >= 2:
         score += 12
@@ -738,6 +860,10 @@ def analyze_sentiment_cycle(zt_today, zt_yesterday, breadth, zhaban, dieting):
         score += 4
     else:
         score += 0
+
+    # 炸板率（数据不可用时不参与正常评分计算，改为给中等分10以中性处理）
+    if zhaban_unavailable:
+        score += 10
 
     # ===== 周期判断 =====
     if score >= 80:
@@ -770,6 +896,7 @@ def analyze_sentiment_cycle(zt_today, zt_yesterday, breadth, zhaban, dieting):
         "up_down_ratio": up_down_ratio,
         "up": up,
         "down": down,
+        "data_quality": data_quality,
     }
 
 
@@ -1646,8 +1773,8 @@ def main():
     nzi_stocks = run_nzi_filter(date_str)
     nzi_img = create_stock_image("N字反包", nzi_stocks, f"{output_dir}/N字反包_{date_str}.png", date_display)
 
-    # ===== Step 5.5: 情绪周期分析 =====
-    print("\n[Step 5.5] 情绪周期分析...")
+    # ===== Step 5.5: 情绪周期分析（不再生成/推送图片，复盘PDF已包含） =====
+    print("\n[Step 5.5] 情绪周期分析（仅日志，不生成图片）...")
     breadth = get_market_breadth()
     index_data = get_index_data()
     zhaban = get_zhaban_count(date_str)
@@ -1658,11 +1785,8 @@ def main():
     print(f"  涨停:{sentiment['zt_count']} 跌停:{sentiment['dt_count']} 连板高度:{sentiment['max_lbc']}板")
     print(f"  晋级率:{sentiment['jinji_rate']:.0f}% 炸板率:{sentiment['zhaban_rate']:.0f}% 涨跌比:{sentiment['up_down_ratio']:.1f}")
 
-    sentiment_img = create_sentiment_image(sentiment, index_data, date_display, f"{output_dir}/情绪周期_{date_str}.png")
-
-    # ===== Step 4: 推送图片 =====
+    # ===== Step 6: 推送图片（不再推送情绪周期图片） =====
     print("\n[Step 6] 推送图片...")
-    send_image(sentiment_img)
     send_image(lianban_img)
     send_image(huiluo_img)
     send_image(duanban_img)
