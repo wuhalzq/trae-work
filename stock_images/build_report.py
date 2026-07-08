@@ -115,11 +115,11 @@ def get_styles():
         ),
         'positive': ParagraphStyle(
             'Positive', fontName=CJK_FONT, fontSize=9, leading=13,
-            textColor=GREEN_COLOR, wordWrap='CJK', alignment=TA_CENTER
+            textColor=RED_COLOR, wordWrap='CJK', alignment=TA_CENTER
         ),
         'negative': ParagraphStyle(
             'Negative', fontName=CJK_FONT, fontSize=9, leading=13,
-            textColor=RED_COLOR, wordWrap='CJK', alignment=TA_CENTER
+            textColor=GREEN_COLOR, wordWrap='CJK', alignment=TA_CENTER
         ),
         'red_text': ParagraphStyle(
             'RedText', fontName=CJK_FONT, fontSize=12, leading=18,
@@ -146,6 +146,7 @@ def create_table(data, col_widths=None, style=None):
     if not data:
         return None
     
+    styles = get_styles()
     # 包装单元格
     wrapped_data = []
     for i, row in enumerate(data):
@@ -154,16 +155,18 @@ def create_table(data, col_widths=None, style=None):
             cell_str = str(cell) if cell is not None else ""
             cell_str = normalize_text(cell_str)
             
-            # 判断颜色
-            if isinstance(cell, str):
+            # 第一行用表头样式（白字）
+            if i == 0:
+                wrapped_row.append(Paragraph(cell_str, styles['table_header']))
+            elif isinstance(cell, str):
                 if cell.startswith('+') or cell.startswith('↑'):
-                    wrapped_row.append(Paragraph(cell_str, get_styles()['positive']))
+                    wrapped_row.append(Paragraph(cell_str, styles['positive']))
                 elif cell.startswith('-') or cell.startswith('↓'):
-                    wrapped_row.append(Paragraph(cell_str, get_styles()['negative']))
+                    wrapped_row.append(Paragraph(cell_str, styles['negative']))
                 else:
-                    wrapped_row.append(Paragraph(cell_str, get_styles()['table_body']))
+                    wrapped_row.append(Paragraph(cell_str, styles['table_body']))
             else:
-                wrapped_row.append(Paragraph(cell_str, get_styles()['table_body']))
+                wrapped_row.append(Paragraph(cell_str, styles['table_body']))
         wrapped_data.append(wrapped_row)
     
     table = Table(wrapped_data, colWidths=col_widths)
@@ -289,7 +292,8 @@ def generate_pdf(data, output_path):
         story.append(_)
     index_data = data.get('index', [])
     if index_data:
-        index_table = create_table(index_data, col_widths=[1.8*inch, 1.4*inch, 1.2*inch, 1.2*inch])
+        index_header = [["指数", "收盘", "涨跌幅", "成交额"]]
+        index_table = create_table(index_header + index_data, col_widths=[1.8*inch, 1.4*inch, 1.2*inch, 1.2*inch])
         if index_table:
             story.append(index_table)
             story.append(Spacer(1, 0.15*inch))
@@ -305,14 +309,16 @@ def generate_pdf(data, output_path):
     bx_data = data.get('bx', [])
     if bx_data:
         story.append(Paragraph(normalize_text("北向资金（沪深股通）"), styles['h2']))
-        bx_table = create_table(bx_data, col_widths=[1.5*inch, 1.5*inch, 2.6*inch])
+        bx_header = [["方向", "金额", "说明"]]
+        bx_table = create_table(bx_header + bx_data, col_widths=[1.5*inch, 1.5*inch, 2.6*inch])
         if bx_table:
             story.append(bx_table)
             story.append(Spacer(1, 0.1*inch))
     zl_data = data.get('zl', [])
     if zl_data:
         story.append(Paragraph(normalize_text("主力资金板块净流入排名"), styles['h2']))
-        zl_table = create_table(zl_data, col_widths=[1.8*inch, 1.4*inch, 2.4*inch])
+        zl_header = [["板块", "净流入", "代表个股"]]
+        zl_table = create_table(zl_header + zl_data, col_widths=[1.8*inch, 1.4*inch, 2.4*inch])
         if zl_table:
             story.append(zl_table)
     story.append(Spacer(1, 0.15*inch))
@@ -323,7 +329,8 @@ def generate_pdf(data, output_path):
         story.append(_)
     qx_data = data.get('qx', [])
     if qx_data:
-        qx_table = create_table(qx_data, col_widths=[1.5*inch, 1.3*inch, 2.8*inch])
+        qx_header = [["指标", "数值", "解读"]]
+        qx_table = create_table(qx_header + qx_data, col_widths=[1.5*inch, 1.3*inch, 2.8*inch])
         if qx_table:
             story.append(qx_table)
             story.append(Spacer(1, 0.1*inch))
@@ -343,7 +350,8 @@ def generate_pdf(data, output_path):
         cycle_week = data.get('cycle_week', [])
         if cycle_week:
             story.append(Paragraph(normalize_text("本周情绪周期演进"), styles['h2']))
-            cw_table = create_table_ex(cycle_week, col_widths=[
+            cw_header = [["日期", "涨停", "跌停", "连板高度", "封板率", "晋级率", "阶段判定", "标志事件"]]
+            cw_table = create_table_ex(cw_header + cycle_week, col_widths=[
                 content_width*0.09, content_width*0.07, content_width*0.07, content_width*0.08,
                 content_width*0.07, content_width*0.07, content_width*0.16, content_width*0.39], small_font=True)
             if cw_table:
@@ -353,7 +361,8 @@ def generate_pdf(data, output_path):
         cycle_judgment = data.get('cycle_judgment', [])
         if cycle_judgment:
             story.append(Paragraph(normalize_text("当日判定信号"), styles['h2']))
-            cj_table = create_table_ex(cycle_judgment, col_widths=[
+            cj_header = [["判定维度", "信号", "状态"]]
+            cj_table = create_table_ex(cj_header + cycle_judgment, col_widths=[
                 content_width*0.25, content_width*0.45, content_width*0.30])
             if cj_table:
                 story.append(cj_table)
@@ -370,7 +379,8 @@ def generate_pdf(data, output_path):
         for _ in add_divider(content_width):
             story.append(_)
         story.append(Paragraph(normalize_text("强势板块（逆势/抗跌）"), styles['h2']))
-        ss_table = create_table_ex(strong_sectors, col_widths=[
+        ss_header = [["板块", "强度", "催化逻辑", "龙头个股", "表现"]]
+        ss_table = create_table_ex(ss_header + strong_sectors, col_widths=[
             content_width*0.15, content_width*0.08, content_width*0.30,
             content_width*0.20, content_width*0.27], small_font=True)
         if ss_table:
@@ -379,7 +389,8 @@ def generate_pdf(data, output_path):
         ladder = data.get('ladder', [])
         if ladder:
             story.append(Paragraph(normalize_text("连板梯队（市场高度锚点）"), styles['h2']))
-            ld_table = create_table_ex(ladder, col_widths=[
+            ld_header = [["层级", "个股", "连板数", "定位", "风险提示"]]
+            ld_table = create_table_ex(ld_header + ladder, col_widths=[
                 content_width*0.10, content_width*0.20, content_width*0.12,
                 content_width*0.28, content_width*0.30])
             if ld_table:
@@ -388,7 +399,8 @@ def generate_pdf(data, output_path):
         risk_sectors = data.get('risk_sectors', [])
         if risk_sectors:
             story.append(Paragraph(normalize_text("退潮/风险板块（回避）"), styles['h2']))
-            rs_table = create_table_ex(risk_sectors, col_widths=[
+            rs_header = [["板块", "状态", "代表个股", "回避原因"]]
+            rs_table = create_table_ex(rs_header + risk_sectors, col_widths=[
                 content_width*0.18, content_width*0.15, content_width*0.22, content_width*0.45],
                 header_color=RED_COLOR)
             if rs_table:
@@ -512,7 +524,8 @@ def generate_pdf(data, output_path):
     mode_today = data.get('mode_today', [])
     if mode_today:
         story.append(Paragraph(normalize_text("10.1 当日操作建议"), styles['h2']))
-        mt_table = create_table_ex(mode_today, col_widths=[
+        mt_header = [["模式", "操作建议", "原因"]]
+        mt_table = create_table_ex(mt_header + mode_today, col_widths=[
             content_width*0.12, content_width*0.22, content_width*0.66],
             header_color=RED_COLOR)
         if mt_table:
@@ -544,7 +557,8 @@ def generate_pdf(data, output_path):
     week_reflection = data.get('week_reflection', [])
     if week_reflection:
         story.append(Paragraph(normalize_text("10.3 本周复盘反思（两模式对照）"), styles['h2']))
-        wr_table = create_table_ex(week_reflection, col_widths=[
+        wr_header = [["日期", "周期阶段", "打板接力最优操作", "龙回头最优操作", "是否该操作"]]
+        wr_table = create_table_ex(wr_header + week_reflection, col_widths=[
             content_width*0.10, content_width*0.12, content_width*0.28,
             content_width*0.30, content_width*0.20], small_font=True)
         if wr_table:
