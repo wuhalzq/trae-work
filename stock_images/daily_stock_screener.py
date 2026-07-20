@@ -1078,25 +1078,26 @@ def get_stock_kline(stock_code, days=20):
     
     return result
 
-def check_near_high(stock_code, days=10):
+def check_near_high(stock_code, days=10, high_days=60):
     """
-    检查近N日内股价是否接近或突破过近3个月高点
-    判断标准：近N日最高价 >= 近3个月最高价的90%
+    检查近N日内股价是否接近或突破过近high_days日高点
+    判断标准：近N日最高价 >= 近high_days日最高价的90%
+    high_days默认60（约3个月），可传40（约2个月）等自定义高点基准
     """
-    klines = get_stock_kline(stock_code, days=60)
+    klines = get_stock_kline(stock_code, days=high_days)
     if len(klines) < 2:
         return False
-    
-    # 近3个月（约60个交易日）最高价
-    max_high_3m = max(k["high"] for k in klines)
-    if max_high_3m <= 0:
+
+    # 近high_days日最高价（高点基准）
+    max_high_base = max(k["high"] for k in klines)
+    if max_high_base <= 0:
         return False
-    
+
     # 近N日最高价
     recent_klines = klines[-days:] if len(klines) >= days else klines
     max_high_recent = max(k["high"] for k in recent_klines)
-    
-    return max_high_recent >= max_high_3m * 0.9
+
+    return max_high_recent >= max_high_base * 0.9
 
 def check_had_zt_in_days(stock_code, days=20):
     """检查近N日内是否有涨停（涨幅>=9.8%）"""
@@ -1200,7 +1201,7 @@ def run_filters(renqi_data, zt_today, zt_yesterday, date_str):
     hotness_rank = build_unified_hotness_rank(renqi_data, list(all_candidate_codes))
     
     # ===== 条件1：连板股 =====
-    # 今日涨停 + 10日内接近3个月高点 + 非ST + 主板
+    # 今日涨停 + 20日内接近2个月高点(40日) + 非ST + 主板，按人气排名前20
     lianban = []
     for s in zt_today:
         code = s["code"]
@@ -1210,7 +1211,7 @@ def run_filters(renqi_data, zt_today, zt_yesterday, date_str):
             continue
         if not is_main_board(code):
             continue
-        if not check_near_high(code, days=10):
+        if not check_near_high(code, days=20, high_days=40):
             continue
         
         rank_info = hotness_rank.get(code, (9999, "", s.get("change_pct", 0)))
