@@ -1469,6 +1469,116 @@ def get_nzi_realtime_detail(codes):
     return result
 
 
+# ========== 东方财富人气排名（N字反包专用）==========
+
+EM_RANK_HEADERS = {
+    'accept-encoding': 'gzip, deflate, br',
+    'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8',
+    'content-type': 'application/json',
+    'origin': 'https://vipmoney.eastmoney.com',
+    'referer': 'https://vipmoney.eastmoney.com/',
+    'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                  '(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
+}
+EM_GLOBAL_ID = "786e4c21-70dc-435a-93bb-38"
+
+
+def get_em_popularity_top100():
+    """
+    获取东方财富人气榜前100名
+    返回: dict {code(6位): rank}
+    """
+    url = 'https://emappdata.eastmoney.com/stockrank/getAllCurrentList'
+    data = {
+        "appId": "appId01",
+        "globalId": EM_GLOBAL_ID,
+        "marketType": "",
+        "pageNo": 1,
+        "pageSize": 100
+    }
+    result_map = {}
+    try:
+        res = requests.post(url, data=json.dumps(data), headers=EM_RANK_HEADERS, timeout=15)
+        text = res.json()
+        for item in text.get('data', []):
+            sc = item.get('sc', '')  # 如 SH688836
+            rk = item.get('rk', 0)
+            code = sc[2:] if len(sc) > 2 else sc  # 去掉SH/SZ前缀
+            if code and rk:
+                result_map[code] = rk
+        print(f"[东财人气] 获取到前{len(result_map)}名人气榜")
+    except Exception as e:
+        print(f"[东财人气] 获取人气榜失败: {e}")
+    return result_map
+
+
+def get_em_single_stock_rank(code):
+    """
+    查询单只股票的东方财富人气排名（支持前100名以外的股票）
+    返回: int 排名值，0表示查询失败
+    """
+    url = 'https://emappdata.eastmoney.com/stockrank/getCurrentList'
+    prefix = 'SH' if code.startswith('6') else 'SZ'
+    src_code = f"{prefix}{code}"
+    data = {
+        "appId": "appId01",
+        "globalId": EM_GLOBAL_ID,
+        "marketType": "",
+        "srcSecurityCode": src_code
+    }
+    try:
+        res = requests.post(url, data=json.dumps(data), headers=EM_RANK_HEADERS, timeout=10)
+        text = res.json()
+        rank_list = text.get('data', [])
+        if rank_list and isinstance(rank_list, list):
+            # 取最后一条（最新时间点）的排名
+            last = rank_list[-1]
+            if isinstance(last, dict):
+                return int(last.get('rank', 0))
+    except Exception:
+        pass
+    return 0
+
+
+def get_em_batch_stock_ranks(codes, top100_map=None):
+    """
+    批量获取候选股的东方财富人气排名
+    - 在top100_map中的直接使用，不再单独查询
+    - 不在的通过getCurrentList逐个查询（5线程并发）
+    返回: dict {code: rank}，rank=0表示查询失败，rank>0为实际排名
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    top100_map = top100_map or {}
+    result = {}
+    need_query = []
+
+    for code in codes:
+        if code in top100_map:
+            result[code] = top100_map[code]
+        else:
+            need_query.append(code)
+            result[code] = 0  # 默认值
+
+    if need_query:
+        print(f"[东财人气] 需查询 {len(need_query)} 只非Top100股票排名（5线程并发）...")
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = {executor.submit(get_em_single_stock_rank, c): c for c in need_query}
+            for future in as_completed(futures):
+                code = futures[future]
+                try:
+                    rank = future.result()
+                    result[code] = rank
+                except Exception:
+                    result[code] = 0
+
+        # 统计结果
+        got = sum(1 for v in result.values() if v > 0)
+        print(f"[东财人气] 查询完成：{got}只有排名数据，{len(result)-got}只无数据")
+
+    return result
+
+
 def get_nzi_recent_zt_dates(date_str, num_days=4):
     """获取最近N个交易日的日期列表（跳过周末）"""
     today = datetime.strptime(date_str, "%Y%m%d")
@@ -1569,6 +1679,18 @@ def run_nzi_filter(date_str, max_count=20):
                           "zt_dates": info["zt_dates"], "lbc_max": info["lbc_max"]})
 
     print(f"[N字反包] 断板候选: {len(candidates)} 只")
+
+    # ===== 获取东方财富人气排名（用于过滤低人气股票）=====
+    candidate_codes = [c["code"] for c in candidates]
+    em_top100 = get_em_popularity_top100()
+    em_ranks = get_em_batch_stock_ranks(candidate_codes, em_top100)
+    # 统计人气分布
+    high_pop = sum(1 for v in em_ranks.values() if 0 < v <= 100)
+    mid_pop = sum(1 for v in em_ranks.values() if 100 < v <= 500)
+    low_pop = sum(1 for v in em_ranks.values() if 500 < v <= 1000)
+    ultra_low = sum(1 for v in em_ranks.values() if v > 1000)
+    no_data = sum(1 for v in em_ranks.values() if v == 0)
+    print(f"[N字反包] 人气分布: Top100内{high_pop}只 | 101-500名{mid_pop}只 | 501-1000名{low_pop}只 | 1000名外{ultra_low}只 | 无数据{no_data}只")
 
     qualified = []
     for c in candidates:
@@ -1705,20 +1827,42 @@ def run_nzi_filter(date_str, max_count=20):
         elif same_sector >= 2:
             score += 1
 
+        # ===== 东方财富人气排名评分（最高+4分）=====
+        em_rank = em_ranks.get(code, 0)
+        if 0 < em_rank <= 50:
+            score += 4
+        elif 51 <= em_rank <= 100:
+            score += 3
+        elif 101 <= em_rank <= 300:
+            score += 2
+        elif 301 <= em_rank <= 500:
+            score += 1
+        # 排名>500或无数据不加分
+
         qualified.append({
             "name": c["name"], "code": code, "score": score,
             "hot_cat": hot_cat, "pe": pe, "price": r.get("price", price),
             "amount": amount, "turnover": turnover, "lianban": lianban,
             "days_after": days_after, "today_chg": r.get("change_pct", today_chg),
+            "em_rank": em_rank,
         })
         time.sleep(0.1)
+
+    # ===== 人气过滤：排除排名>1000的低人气股票（排名查询失败的保留）=====
+    EM_RANK_THRESHOLD = 1000
+    before_filter = len(qualified)
+    filtered_detail = [f"{q['name']}({q['code']})#{q['em_rank']}" for q in qualified if q["em_rank"] > EM_RANK_THRESHOLD]
+    qualified = [q for q in qualified if q["em_rank"] == 0 or q["em_rank"] <= EM_RANK_THRESHOLD]
+    if filtered_detail:
+        print(f"[N字反包] 人气过滤: 排除排名>{EM_RANK_THRESHOLD}名的股票 {len(filtered_detail)} 只: {'、'.join(filtered_detail)}")
 
     qualified.sort(key=lambda x: -x["score"])
     result = qualified[:max_count]
 
     print(f"[N字反包] 符合条件: {len(qualified)} 只，取前{len(result)}只")
     for i, s in enumerate(result, 1):
-        print(f"  {i:02d}. {s['name']}({s['code']}) [{s['hot_cat']}] 评分:{s['score']}/30 PE:{s['pe']:.0f}")
+        rank_str = f"人气#{s['em_rank']}" if s['em_rank'] > 0 else "人气无数据"
+        print(f"  {i:02d}. {s['name']}({s['code']}) [{s['hot_cat']}] 评分:{s['score']}/34 PE:{s['pe']:.0f} {rank_str}")
 
     return result
 
