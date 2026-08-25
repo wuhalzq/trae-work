@@ -47,6 +47,23 @@ def is_trading_day():
     today = get_beijing_now()
     return today.weekday() < 5
 
+def get_review_date():
+    """
+    获取复盘基准日期 = 最近一个已收盘的交易日（北京时间）
+    - 交易日 15:05 之后运行 → 当天
+    - 凌晨/盘中运行 → 自动回退到上一个交易日（跳过周末）
+    修复：凌晨运行时日期滚动到未来交易日，导致东财接口回落取数错位
+    （断板=0、晋级率=100%假数据、图片日期标错）
+    """
+    now = get_beijing_now()
+    if now.weekday() < 5 and (now.hour, now.minute) >= (15, 5):
+        return now
+    d = now
+    while True:
+        d = d - timedelta(days=1)
+        if d.weekday() < 5:
+            return d
+
 # ========== 数据获取：复盘网人气榜 ==========
 
 def get_renqi_data():
@@ -60,11 +77,20 @@ def get_renqi_data():
                       "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     }
     
-    try:
-        response = requests.get(url, headers=headers, timeout=15)
-        response.encoding = "utf-8"
-    except Exception as e:
-        print(f"[人气榜] 请求失败: {e}")
+    response = None
+    for attempt in range(3):
+        try:
+            response = requests.get(url, headers=headers, timeout=15)
+            response.encoding = "utf-8"
+            break
+        except Exception as e:
+            print(f"[人气榜] 第{attempt + 1}次请求失败: {e}")
+            response = None
+            if attempt < 2:
+                time.sleep(3)
+    
+    if response is None:
+        print("[人气榜] 连续3次请求失败")
         return []
     
     soup = BeautifulSoup(response.text, "html.parser")
@@ -247,11 +273,21 @@ def get_zt_pool(date_str):
         "_": str(int(time.time() * 1000)),
     }
     
-    try:
-        response = requests.get(url, params=params, headers=HEADERS, timeout=15)
-        data = response.json()
-    except Exception as e:
-        print(f"[涨停板] 请求失败: {e}")
+    data = None
+    for attempt in range(3):
+        try:
+            params["_"] = str(int(time.time() * 1000))
+            response = requests.get(url, params=params, headers=HEADERS, timeout=15)
+            data = response.json()
+            break
+        except Exception as e:
+            print(f"[涨停板] 第{attempt + 1}次请求失败: {e}")
+            data = None
+            if attempt < 2:
+                time.sleep(3)
+    
+    if data is None:
+        print(f"[涨停板] 日期 {date_str} 连续3次请求失败")
         return []
     
     if not data.get("data") or not data["data"].get("pool"):
@@ -1023,7 +1059,7 @@ def _get_tencent_code(stock_code):
     else:
         return f"sz{stock_code}"
 
-def get_stock_kline(stock_code, days=20):
+def _get_tencent_kline(stock_code, days=20):
     """
     获取个股近N日日K线数据（腾讯前复权）
     返回: list[dict]，每条包含 date, open, close, high, low, volume, change_pct
@@ -1077,6 +1113,118 @@ def get_stock_kline(stock_code, days=20):
         })
     
     return result
+
+# 腾讯K线源连续失败计数：超过阈值后本次运行直接走新浪，避免逐个请求白等超时
+_TENCENT_KLINE_FAILS = 0
+_TENCENT_KLINE_MAX_FAILS = 3
+
+# 新浪源限流：记录上次请求时间，强制请求间隔，防止被限流后批量失败
+_SINA_LAST_CALL = 0.0
+_SINA_MIN_INTERVAL = 0.3  # 秒
+
+# K线缓存：同一股票多次取数（40日/20日/10日）只发一次请求
+_KLINE_CACHE = {}  # {code: {"days": N, "data": [...]}}
+
+def _get_sina_kline(stock_code, days=20):
+    """
+    获取个股近N日日K线数据（新浪财经，腾讯源被WAF拦截时的备用源）
+    带限流保护：强制请求间隔，避免连发被限流
+    返回: list[dict]，字段与 _get_tencent_kline 一致
+    """
+    global _SINA_LAST_CALL
+    sc = _get_tencent_code(stock_code)  # 新浪同样使用 sh/sz 前缀
+    url = ("https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
+           "CN_MarketData.getKLineData")
+    params = {
+        "symbol": sc,
+        "scale": 240,  # 240分钟 = 日K
+        "ma": "no",
+        "datalen": days,
+    }
+    try:
+        # 限流：确保与上次新浪请求间隔足够
+        now = time.time()
+        wait = _SINA_MIN_INTERVAL - (now - _SINA_LAST_CALL)
+        if wait > 0:
+            time.sleep(wait)
+        _SINA_LAST_CALL = time.time()
+        response = requests.get(url, params=params, headers=HEADERS, timeout=10)
+        response.encoding = "utf-8"
+        raw = json.loads(response.text)
+    except Exception:
+        return []
+    
+    if not isinstance(raw, list) or not raw:
+        return []
+    
+    result = []
+    for i, line in enumerate(raw):
+        try:
+            close_price = float(line["close"])
+        except (KeyError, ValueError, TypeError):
+            continue
+        change_pct = 0.0
+        if i > 0:
+            try:
+                prev_close = float(raw[i - 1]["close"])
+            except (KeyError, ValueError, TypeError):
+                prev_close = 0
+            if prev_close > 0:
+                change_pct = (close_price - prev_close) / prev_close * 100
+        
+        try:
+            result.append({
+                "date": str(line.get("day", "")),
+                "open": float(line.get("open", 0)),
+                "close": close_price,
+                "high": float(line.get("high", 0)),
+                "low": float(line.get("low", 0)),
+                "volume": float(line.get("volume", 0)),
+                "change_pct": change_pct,
+            })
+        except (ValueError, TypeError):
+            continue
+    
+    return result
+
+def get_stock_kline(stock_code, days=20):
+    """
+    获取个股K线数据（带缓存 + 双源fallback + 失败退避重试）
+    - 缓存：同一股票取过多周期（40/20/10日）只发一次请求，取更长周期复用
+    - 主源腾讯（连续3次失败自动熔断），备用源新浪（限流保护）
+    - 失败后等待1.5秒重试一轮
+    """
+    global _TENCENT_KLINE_FAILS
+    
+    # 命中缓存：已有更长或等长序列，直接切片返回
+    cache = _KLINE_CACHE.get(stock_code)
+    if cache and cache["days"] >= days and len(cache["data"]) >= days:
+        return cache["data"][-days:]
+    
+    for attempt in range(2):
+        # 主源：腾讯（未被熔断时）
+        if _TENCENT_KLINE_FAILS < _TENCENT_KLINE_MAX_FAILS:
+            klines = _get_tencent_kline(stock_code, days=days)
+            if klines:
+                _TENCENT_KLINE_FAILS = 0
+                if not cache or len(klines) > len(cache["data"]):
+                    _KLINE_CACHE[stock_code] = {"days": days, "data": klines}
+                return klines
+            _TENCENT_KLINE_FAILS += 1
+            if _TENCENT_KLINE_FAILS == _TENCENT_KLINE_MAX_FAILS:
+                print("[K线] 腾讯源连续3次失败（疑似WAF拦截），本轮降级为新浪备用源")
+        
+        # 备用源：新浪（带限流）
+        klines = _get_sina_kline(stock_code, days=days)
+        if klines:
+            if not cache or len(klines) > len(cache["data"]):
+                _KLINE_CACHE[stock_code] = {"days": days, "data": klines}
+            return klines
+        if attempt < 1:
+            time.sleep(1.5)  # 退避后重试一轮
+    
+    print(f"[K线] {stock_code} 腾讯+新浪均取数失败")
+    return []
 
 def check_near_high(stock_code, days=10, high_days=60):
     """
@@ -1607,9 +1755,21 @@ def get_nzi_zt_pool(date_str):
         "date": date_str,
         "_": str(int(time.time() * 1000)),
     }
+    data = None
+    for attempt in range(3):
+        try:
+            params["_"] = str(int(time.time() * 1000))
+            resp = requests.get(url, params=params, headers=HEADERS, timeout=15)
+            data = resp.json()
+            break
+        except Exception as e:
+            print(f"[N字反包] 获取{date_str}涨停板第{attempt + 1}次失败: {e}")
+            data = None
+            if attempt < 2:
+                time.sleep(3)
+    if data is None:
+        return []
     try:
-        resp = requests.get(url, params=params, headers=HEADERS, timeout=15)
-        data = resp.json()
         if not data.get("data") or not data["data"].get("pool"):
             return []
         result = []
@@ -1874,15 +2034,19 @@ def main():
     print(f"=== A股每日筛选任务开始 ===")
     print(f"当前时间(北京时间): {beijing_now.strftime('%Y-%m-%d %H:%M:%S')}")
     
-    # 检查是否为交易日
-    if not is_trading_day():
-        print("今日为非交易日，跳过执行")
+    # 周末直接跳过（避免重复推送上一交易日数据）
+    if beijing_now.weekday() >= 5:
+        print("今日为周末非交易日，跳过执行")
         return
     
-    date_str = beijing_now.strftime("%Y%m%d")
-    date_display = beijing_now.strftime("%Y.%m.%d")
+    # 复盘基准日 = 最近一个已收盘的交易日（凌晨/盘中运行自动回退）
+    review_dt = get_review_date()
+    date_str = review_dt.strftime("%Y%m%d")
+    date_display = review_dt.strftime("%Y.%m.%d")
     
-    print(f"交易日: {date_display}")
+    print(f"复盘基准日: {date_display}")
+    if date_str != beijing_now.strftime("%Y%m%d"):
+        print(f"[提示] 当前处于凌晨/盘中时段，自动回退复盘上一交易日 {date_display}")
     
     # ===== Step 1: 获取数据 =====
     print("\n[Step 1] 获取人气榜数据...")
@@ -1896,14 +2060,27 @@ def main():
     print("\n[Step 2] 获取今日涨停数据...")
     zt_today = get_zt_pool(date_str)
     
+    # 空数据熔断：交易日涨停池不可能为空，为空说明接口故障，避免推送空图
+    if not zt_today:
+        print("[严重] 今日涨停池为空（接口故障或数据未生成），任务终止，不推送空图")
+        return
+    
     time.sleep(1)
     
     print("\n[Step 3] 获取昨日涨停数据...")
     zt_yesterday = get_yesterday_zt_pool(date_str)
     
+    # 数据一致性自检：今日与昨日涨停池完全相同 = 接口日期回落错位
+    if zt_yesterday and {s["code"] for s in zt_today} == {s["code"] for s in zt_yesterday}:
+        print("[警告] 今日与昨日涨停池数据完全相同，疑似日期错位，请人工核对！")
+    
     # ===== Step 2: 执行筛选 =====
     print("\n[Step 4] 执行筛选条件...")
     data = run_filters(renqi_data, zt_today, zt_yesterday, date_str)
+    
+    # 全空警告：三类筛选均为空大概率是K线/人气接口异常，而非市场真实情况
+    if not (data["lianban"] or data["huiluo"] or data["duanban"]):
+        print("[警告] 连板/回调/断板三类筛选结果均为空，可能K线或人气接口异常，请检查上方日志")
     
     # ===== Step 3: 生成图片 =====
     print("\n[Step 5] 生成图片...")
