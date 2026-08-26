@@ -141,6 +141,19 @@ def normalize_text(text):
     return text
 
 # ============== 表格辅助函数 ==============
+def strip_header_row(rows, header):
+    """若JSON数据首行与表头相同（任务模板格式自带表头），则去除，避免重复表头"""
+    if not rows or not header:
+        return rows
+    first = rows[0]
+    try:
+        if isinstance(first, (list, tuple)) and len(first) == len(header) and \
+           all(str(a).strip() == str(b).strip() for a, b in zip(first, header)):
+            return list(rows[1:])
+    except Exception:
+        pass
+    return rows
+
 def create_table(data, col_widths=None, style=None):
     """创建表格"""
     if not data:
@@ -372,7 +385,7 @@ def generate_pdf(data, output_path, report_date_str=None):
     index_data = data.get('index', [])
     if index_data:
         index_header = [["指数", "收盘", "涨跌幅", "成交额"]]
-        index_table = create_table(index_header + index_data, col_widths=[1.8*inch, 1.4*inch, 1.2*inch, 1.2*inch])
+        index_table = create_table(index_header + strip_header_row(index_data, index_header[0]), col_widths=[1.8*inch, 1.4*inch, 1.2*inch, 1.2*inch])
         if index_table:
             story.append(index_table)
             story.append(Spacer(1, 0.15*inch))
@@ -527,24 +540,45 @@ def generate_pdf(data, output_path, report_date_str=None):
     story.append(Spacer(1, 0.15*inch))
 
     # ========== 八、近期重大事项日历（未来两周）==========
+    # 数据源优先级：calendar字段（复盘时联网搜索整理的当日最新事件，4列格式）
+    #             > events_calendar字段（5列格式）> 内置默认清单（自动按报告日过滤14天窗口）
+    calendar_rows = data.get('calendar', [])
     raw_events = data.get('events_calendar', [])
     events, ev_base = filter_events_window(
         raw_events if raw_events else get_default_events_calendar(), report_date_str)
-    if events:
+    if calendar_rows or events:
         story.append(Paragraph(normalize_text("八、近期重大事项日历（未来两周）"), styles['h1']))
         for _ in add_divider(content_width):
             story.append(_)
-        ev_rows = build_events_calendar_rows(events, ev_base)
-        if ev_rows:
-            ev_header = [["日期", "类别", "事项", "说明", "重要性"]]
-            ev_table = create_table_ex(ev_header + ev_rows, col_widths=[
-                content_width*0.16, content_width*0.08, content_width*0.24,
-                content_width*0.42, content_width*0.10], small_font=True)
-            if ev_table:
-                story.append(ev_table)
-        ev_note = data.get('events_note', '')
+        if calendar_rows:
+            # calendar字段格式：[["日期","时间","事件","影响板块/关注点"], ...]（含表头行）
+            first = calendar_rows[0] if calendar_rows else []
+            if not (isinstance(first, (list, tuple)) and len(first) >= 3 and "事件" in str(first[2])):
+                calendar_rows = [["日期", "时间", "事件", "影响板块/关注点"]] + list(calendar_rows)
+            cal_table = create_table_ex(calendar_rows, col_widths=[
+                content_width*0.14, content_width*0.09, content_width*0.42, content_width*0.35], small_font=True)
+            if cal_table:
+                story.append(cal_table)
+        else:
+            ev_rows = build_events_calendar_rows(events, ev_base)
+            if ev_rows:
+                ev_header = [["日期", "类别", "事项", "说明", "重要性"]]
+                ev_table = create_table_ex(ev_header + ev_rows, col_widths=[
+                    content_width*0.16, content_width*0.08, content_width*0.24,
+                    content_width*0.42, content_width*0.10], small_font=True)
+                if ev_table:
+                    story.append(ev_table)
+        ev_note = data.get('calendar_note', '') or data.get('events_note', '')
         if ev_note:
-            story.append(Paragraph(normalize_text(ev_note), styles['body']))
+            story.append(Spacer(1, 0.06*inch))
+            if isinstance(ev_note, str):
+                for line in ev_note.split('\n'):
+                    if line.strip():
+                        story.append(Paragraph(normalize_text("• " + line.strip()), styles['body']))
+            elif isinstance(ev_note, list):
+                for item in ev_note:
+                    if item:
+                        story.append(Paragraph(normalize_text("• " + str(item)), styles['body']))
         story.append(Spacer(1, 0.15*inch))
 
     # ========== 九、今日总结 ==========
@@ -597,7 +631,7 @@ def generate_pdf(data, output_path, report_date_str=None):
     quick_data = data.get('quick', [])
     if quick_data:
         quick_header = [["层级", "个股", "代码", "今日表现"]]
-        quick_table_data = quick_header + quick_data
+        quick_table_data = quick_header + strip_header_row(quick_data, quick_header[0])
         quick_table = create_table(quick_table_data, col_widths=[1.0*inch, 1.5*inch, 1.1*inch, 2.0*inch])
         if quick_table:
             story.append(quick_table)
@@ -663,33 +697,6 @@ def generate_pdf(data, output_path, report_date_str=None):
             content_width*0.30, content_width*0.20], small_font=True)
         if wr_table:
             story.append(wr_table)
-
-    # ========== 十一、大事件日历（未来两周）==========
-    calendar_data = data.get('calendar', [])
-    calendar_note = data.get('calendar_note', '')
-    if calendar_data or calendar_note:
-        story.append(PageBreak())
-        story.append(Paragraph(normalize_text("十一、大事件日历（未来两周）"), styles['h1']))
-        for _ in add_divider(content_width):
-            story.append(_)
-        if calendar_data:
-            cal_header = [["日期", "时间", "事件", "影响板块/关注点"]]
-            cal_table = create_table_ex(cal_header + calendar_data, col_widths=[
-                content_width*0.12, content_width*0.10, content_width*0.43, content_width*0.35], small_font=True)
-            if cal_table:
-                story.append(cal_table)
-            story.append(Spacer(1, 0.1*inch))
-        if calendar_note:
-            story.append(Paragraph(normalize_text("📌 日历要点"), styles['h2']))
-            if isinstance(calendar_note, str):
-                for line in calendar_note.split('\n'):
-                    if line.strip():
-                        story.append(Paragraph(normalize_text("• " + line.strip()), styles['body']))
-            elif isinstance(calendar_note, list):
-                for item in calendar_note:
-                    if item:
-                        story.append(Paragraph(normalize_text("• " + str(item)), styles['body']))
-            story.append(Spacer(1, 0.1*inch))
 
     # ========== 生成PDF ==========
     doc.build(story)
