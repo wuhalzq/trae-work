@@ -10,7 +10,7 @@ import sys
 import os
 import time
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # PDF生成
 from reportlab.lib.pagesizes import A4
@@ -260,8 +260,87 @@ def add_divider(width, height=1, color=HexColor('#e2e8f0'), space_before=6, spac
     story.append(Spacer(1, space_after))
     return story
 
+# ============== 近期重大事项日历（未来两周） ==============
+
+def get_default_events_calendar():
+    """
+    未来两周重大事项默认清单（带完整日期 YYYYMMDD，按报告日自动过滤14天窗口）
+    格式: [日期, 类别, 事项, 说明, 重要性]
+    外部 JSON 可通过 events_calendar 字段覆盖（格式相同，缺省时使用本清单）
+    更新记录: 2026-08-26 依据公开信息整理
+    """
+    return [
+        ["20260826", "财报", "英伟达 Q2 FY2027 财报", "美股盘后公布，一致预期营收920亿美元 / EPS 2.09美元，AI链风向标", "重磅"],
+        ["20260826", "发射", "SpaceX · Starlink 发射", "猎鹰9 · 范登堡 · 一箭27星组网", "关注"],
+        ["20260827", "上市", "希音 / 梅卡曼德 招股截止", "港股公开发售中午12:00截止", "关注"],
+        ["20260830", "发射", "罗曼空间望远镜发射", "SpaceX猎鹰9 · 肯尼迪中心 · NASA新一代旗舰天文台", "重磅"],
+        ["20260831", "财报", "A股中报披露截止", "半年报全部出齐，业绩雷与超预期集中兑现", "重磅"],
+        ["20260831", "上市", "希音 / 梅卡曼德 暗盘", "上市前最后一个交易日暗盘交易", "关注"],
+        ["20260901", "上市", "SHEIN 希音-W 港股上市", "0625.HK · 募资最高超154亿港元 · 年内最受关注IPO", "重磅"],
+        ["20260901", "上市", "梅卡曼德机器人 港股上市", "9615.HK · 工业机器人 / 具身智能", "关注"],
+        ["20260904", "宏观", "美国8月非农就业数据", "北京时间20:30 · 9月FOMC会前最后一份就业报告", "重磅"],
+        ["20260908", "会议", "聚合智能产业发展大会2026", "武汉光谷 · 9/8-9 · 智能汽车 / 具身智能 / 低空经济", "关注"],
+        ["20260909", "发布会", "苹果秋季发布会", "北京时间凌晨1:00 · iPhone 18系列 + 首款折叠屏iPhone Ultra", "重磅"],
+        ["20260909", "会议", "2026服贸会开幕", "北京首钢园 · 9/9-13 · 全球服务贸易交易会", "关注"],
+    ]
+
+def filter_events_window(events, report_date_str=None):
+    """
+    过滤出报告日起未来14天内（含当天）的事项，按日期排序
+    返回: (过滤后清单, 基准日期date对象)
+    """
+    base = None
+    if report_date_str:
+        for fmt in ("%Y%m%d", "%Y-%m-%d"):
+            try:
+                base = datetime.strptime(str(report_date_str), fmt).date()
+                break
+            except ValueError:
+                continue
+    if base is None:
+        base = datetime.now().date()
+    window_end = base + timedelta(days=14)
+
+    result = []
+    for ev in events:
+        try:
+            d = str(ev[0]).replace("-", "").replace(".", "")
+            if len(d) != 8:
+                continue
+            ev_date = datetime.strptime(d, "%Y%m%d").date()
+        except (ValueError, IndexError):
+            continue
+        if base <= ev_date <= window_end:
+            result.append(ev)
+    result.sort(key=lambda x: str(x[0]).replace("-", "").replace(".", ""))
+    return result, base
+
+def build_events_calendar_rows(events, base):
+    """将事件清单转为表格行，日期列带相对天数标注"""
+    rows = []
+    for ev in events:
+        try:
+            d = str(ev[0]).replace("-", "").replace(".", "")
+            ev_date = datetime.strptime(d, "%Y%m%d").date()
+            dd = (ev_date - base).days
+        except (ValueError, IndexError):
+            continue
+        d_display = f"{d[4:6]}月{d[6:8]}日"
+        if dd == 0:
+            d_display += "（今天）"
+        elif dd == 1:
+            d_display += "（明天）"
+        else:
+            d_display += f"（D+{dd}）"
+        cat = ev[1] if len(ev) > 1 else ""
+        title = ev[2] if len(ev) > 2 else ""
+        detail = ev[3] if len(ev) > 3 else ""
+        weight = ev[4] if len(ev) > 4 else "关注"
+        rows.append([d_display, cat, title, detail, weight])
+    return rows
+
 # ============== PDF生成 ==============
-def generate_pdf(data, output_path):
+def generate_pdf(data, output_path, report_date_str=None):
     """生成PDF报告（增强版：含情绪周期+龙头板块+两模式操作建议）"""
     styles = get_styles()
 
@@ -447,8 +526,29 @@ def generate_pdf(data, output_path):
                 story.append(Paragraph(normalize_text("• " + line.strip()), styles['body']))
     story.append(Spacer(1, 0.15*inch))
 
-    # ========== 八、今日总结 ==========
-    story.append(Paragraph(normalize_text("八、今日总结"), styles['h1']))
+    # ========== 八、近期重大事项日历（未来两周）==========
+    raw_events = data.get('events_calendar', [])
+    events, ev_base = filter_events_window(
+        raw_events if raw_events else get_default_events_calendar(), report_date_str)
+    if events:
+        story.append(Paragraph(normalize_text("八、近期重大事项日历（未来两周）"), styles['h1']))
+        for _ in add_divider(content_width):
+            story.append(_)
+        ev_rows = build_events_calendar_rows(events, ev_base)
+        if ev_rows:
+            ev_header = [["日期", "类别", "事项", "说明", "重要性"]]
+            ev_table = create_table_ex(ev_header + ev_rows, col_widths=[
+                content_width*0.16, content_width*0.08, content_width*0.24,
+                content_width*0.42, content_width*0.10], small_font=True)
+            if ev_table:
+                story.append(ev_table)
+        ev_note = data.get('events_note', '')
+        if ev_note:
+            story.append(Paragraph(normalize_text(ev_note), styles['body']))
+        story.append(Spacer(1, 0.15*inch))
+
+    # ========== 九、今日总结 ==========
+    story.append(Paragraph(normalize_text("九、今日总结"), styles['h1']))
     for _ in add_divider(content_width):
         story.append(_)
     features = data.get('features', '')
@@ -490,8 +590,8 @@ def generate_pdf(data, output_path):
         story.append(Paragraph(normalize_text(strategy), styles['body']))
     story.append(PageBreak())
 
-    # ========== 九、核心标的速览 ==========
-    story.append(Paragraph(normalize_text("九、核心标的速览"), styles['h1']))
+    # ========== 十、核心标的速览 ==========
+    story.append(Paragraph(normalize_text("十、核心标的速览"), styles['h1']))
     for _ in add_divider(content_width):
         story.append(_)
     quick_data = data.get('quick', [])
@@ -516,14 +616,14 @@ def generate_pdf(data, output_path):
     ]
 
     story.append(PageBreak())
-    story.append(Paragraph(normalize_text("十、两模式操作建议与本周复盘反思"), styles['h1']))
+    story.append(Paragraph(normalize_text("十一、两模式操作建议与本周复盘反思"), styles['h1']))
     for _ in add_divider(content_width):
         story.append(_)
 
     # 当日两模式操作建议
     mode_today = data.get('mode_today', [])
     if mode_today:
-        story.append(Paragraph(normalize_text("10.1 当日操作建议"), styles['h2']))
+        story.append(Paragraph(normalize_text("11.1 当日操作建议"), styles['h2']))
         mt_header = [["模式", "操作建议", "原因"]]
         mt_table = create_table_ex(mt_header + mode_today, col_widths=[
             content_width*0.12, content_width*0.22, content_width*0.66],
@@ -533,14 +633,14 @@ def generate_pdf(data, output_path):
         story.append(Spacer(1, 0.1*inch))
     else:
         # 默认提示
-        story.append(Paragraph(normalize_text("10.1 当日操作建议"), styles['h2']))
+        story.append(Paragraph(normalize_text("11.1 当日操作建议"), styles['h2']))
         story.append(Paragraph(normalize_text("（请根据当前情绪周期参考下方速查表）"), styles['body']))
         story.append(Spacer(1, 0.1*inch))
 
     # 各情绪周期两模式操作建议速查表（永久参考，始终显示）
     # 如果JSON提供了mode_speed则用提供的，否则用内置默认值
     mode_speed = data.get('mode_speed', []) or DEFAULT_MODE_SPEED
-    story.append(Paragraph(normalize_text("10.2 各情绪周期两模式操作建议速查表（永久参考）"), styles['h2']))
+    story.append(Paragraph(normalize_text("11.2 各情绪周期两模式操作建议速查表（永久参考）"), styles['h2']))
     num_cols = len(mode_speed[0]) if mode_speed else 5
     if num_cols >= 7:
         ms_widths = [content_width*0.08, content_width*0.16, content_width*0.16,
@@ -556,7 +656,7 @@ def generate_pdf(data, output_path):
     # 本周复盘反思
     week_reflection = data.get('week_reflection', [])
     if week_reflection:
-        story.append(Paragraph(normalize_text("10.3 本周复盘反思（两模式对照）"), styles['h2']))
+        story.append(Paragraph(normalize_text("11.3 本周复盘反思（两模式对照）"), styles['h2']))
         wr_header = [["日期", "周期阶段", "打板接力最优操作", "龙回头最优操作", "是否该操作"]]
         wr_table = create_table_ex(wr_header + week_reflection, col_widths=[
             content_width*0.10, content_width*0.12, content_width*0.28,
@@ -660,8 +760,8 @@ def main():
     output_dir = "/workspace"
     output_path = os.path.join(output_dir, f"A股短线复盘_{date_str}.pdf")
     
-    # 生成PDF
-    generate_pdf(data, output_path)
+    # 生成PDF（传入报告日期用于事件日历窗口过滤）
+    generate_pdf(data, output_path, date_str)
     
     # 推送
     print("\n开始推送PDF...")
