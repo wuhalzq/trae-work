@@ -564,6 +564,33 @@ def generate_pdf(data, output_path):
         if wr_table:
             story.append(wr_table)
 
+    # ========== 十一、大事件日历（未来两周）==========
+    calendar_data = data.get('calendar', [])
+    calendar_note = data.get('calendar_note', '')
+    if calendar_data or calendar_note:
+        story.append(PageBreak())
+        story.append(Paragraph(normalize_text("十一、大事件日历（未来两周）"), styles['h1']))
+        for _ in add_divider(content_width):
+            story.append(_)
+        if calendar_data:
+            cal_header = [["日期", "时间", "事件", "影响板块/关注点"]]
+            cal_table = create_table_ex(cal_header + calendar_data, col_widths=[
+                content_width*0.12, content_width*0.10, content_width*0.43, content_width*0.35], small_font=True)
+            if cal_table:
+                story.append(cal_table)
+            story.append(Spacer(1, 0.1*inch))
+        if calendar_note:
+            story.append(Paragraph(normalize_text("📌 日历要点"), styles['h2']))
+            if isinstance(calendar_note, str):
+                for line in calendar_note.split('\n'):
+                    if line.strip():
+                        story.append(Paragraph(normalize_text("• " + line.strip()), styles['body']))
+            elif isinstance(calendar_note, list):
+                for item in calendar_note:
+                    if item:
+                        story.append(Paragraph(normalize_text("• " + str(item)), styles['body']))
+            story.append(Spacer(1, 0.1*inch))
+
     # ========== 生成PDF ==========
     doc.build(story)
     print(f"PDF已生成: {output_path}")
