@@ -243,17 +243,50 @@ def get_ths_hot_stock():
     print("[同花顺热度] 兜底方案未获取到数据")
     return []
 
+def get_em_renqi_data():
+    """
+    从东方财富人气榜获取前100名（第二兜底方案）
+    返回: list[dict]，每个dict包含 code, name, mark, rank, change_pct
+    """
+    em_map = get_em_popularity_top100()
+    if not em_map:
+        return []
+
+    codes = list(em_map.keys())
+    realtime = get_batch_realtime(codes)
+
+    result = []
+    for code in codes:
+        rt = realtime.get(code, {})
+        result.append({
+            "code": code,
+            "name": rt.get("name", ""),
+            "mark": "",
+            "rank": em_map[code],
+            "change_pct": rt.get("change_pct", 0),
+        })
+    return result
+
 def get_renqi_data_with_fallback():
     """
-    获取人气排行榜数据，优先复盘网，失败时用同花顺热度兜底
+    获取人气排行榜数据，优先复盘网，失败时依次用同花顺热度、东方财富人气榜兜底
     """
     data = get_renqi_data()
     if data:
         return data
-    
+
     print("[人气榜] 复盘网数据为空，启用同花顺热度兜底方案...")
     time.sleep(2)
-    return get_ths_hot_stock()
+    data = get_ths_hot_stock()
+    if data:
+        return data
+
+    print("[人气榜] 同花顺热度也为空，启用东方财富人气榜兜底方案...")
+    time.sleep(2)
+    data = get_em_renqi_data()
+    if data:
+        print(f"[人气榜] 东方财富兜底获取到 {len(data)} 条数据")
+    return data
 
 # ========== 数据获取：东方财富涨停板 ==========
 
