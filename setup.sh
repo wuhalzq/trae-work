@@ -38,6 +38,7 @@ echo "[2/5] 部署脚本到 /workspace..."
 cp -f "$REPO_DIR/stock_images/build_report.py" /workspace/build_report.py 2>/dev/null && echo "  ✅ build_report.py" || echo "  ⚠️ build_report.py 不存在"
 cp -f "$REPO_DIR/stock_images/theme_discovery.py" /workspace/theme_discovery.py 2>/dev/null && echo "  ✅ theme_discovery.py" || echo "  ⚠️ theme_discovery.py 不存在"
 cp -f "$REPO_DIR/stock_images/daily_stock_screener.py" /workspace/daily_stock_screener.py 2>/dev/null && echo "  ✅ daily_stock_screener.py" || echo "  ⚠️ daily_stock_screener.py 不存在"
+cp -f "$REPO_DIR/stock_images/theme_tracking.json" /workspace/theme_tracking.json 2>/dev/null && echo "  ✅ theme_tracking.json" || echo "  ⚠️ theme_tracking.json 不存在（主线题材池，首日运行可无）"
 
 # ---------- 3. 配置 git ----------
 echo "[3/5] 配置 git..."

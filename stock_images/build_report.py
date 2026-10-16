@@ -499,6 +499,20 @@ def generate_pdf(data, output_path, report_date_str=None):
                 story.append(rs_table)
         story.append(Spacer(1, 0.15*inch))
 
+    # ========== 五（续）、题材生命周期跟踪（独立渲染，不依赖strong_sectors）==========
+    theme_lifecycle = data.get('theme_lifecycle', [])
+    if theme_lifecycle:
+        story.append(Paragraph(normalize_text("题材生命周期跟踪（近10日主线题材池）"), styles['h1']))
+        for _ in add_divider(content_width):
+            story.append(_)
+        tl_header = [["题材", "启动日", "当前阶段", "演变轨迹", "今日表现", "人气龙头", "操作提示"]]
+        tl_table = create_table_ex(tl_header + theme_lifecycle, col_widths=[
+            content_width*0.12, content_width*0.07, content_width*0.08, content_width*0.17,
+            content_width*0.20, content_width*0.13, content_width*0.23], small_font=True)
+        if tl_table:
+            story.append(tl_table)
+        story.append(Spacer(1, 0.15*inch))
+
     # ========== 六、热点题材 ==========
     story.append(Paragraph(normalize_text("六、热点题材"), styles['h1']))
     for _ in add_divider(content_width):

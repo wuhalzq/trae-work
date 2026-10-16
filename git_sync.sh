@@ -24,7 +24,7 @@ cd "$REPO_DIR"
 # 第一步：先把 /workspace 下的脚本同步回仓库（无论是否有改动都执行）
 echo "[1/3] 同步脚本到仓库..."
 CHANGED=false
-for f in build_report.py theme_discovery.py daily_stock_screener.py; do
+for f in build_report.py theme_discovery.py daily_stock_screener.py theme_tracking.json; do
     if [ -f "/workspace/$f" ]; then
         if ! diff -q "/workspace/$f" "$REPO_DIR/stock_images/$f" >/dev/null 2>&1; then
             cp -f "/workspace/$f" "$REPO_DIR/stock_images/$f"
